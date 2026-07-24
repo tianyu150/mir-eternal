@@ -1,0 +1,30 @@
+services:
+  gameserver:
+    build:
+      context: ..
+      dockerfile: deploy/gameserver.Dockerfile
+    environment:
+      MIR_TICKET_SECRET: ${MIR_TICKET_SECRET:?set MIR_TICKET_SECRET}
+    volumes:
+      - game-data:/var/lib/mir/game
+    ports:
+      - "8701:8701/tcp"
+    restart: unless-stopped
+
+  accountserver:
+    build:
+      context: ..
+      dockerfile: deploy/accountserver.Dockerfile
+    environment:
+      MIR_TICKET_SECRET: ${MIR_TICKET_SECRET:?set MIR_TICKET_SECRET}
+    volumes:
+      - account-data:/var/lib/mir/accounts
+    ports:
+      - "7000:7000/udp"
+    depends_on:
+      - gameserver
+    restart: unless-stopped
+
+volumes:
+  account-data:
+  game-data:

@@ -19,6 +19,18 @@ https://www.lomcn.org/forum/threads/legend-of-mir-3d-emu-source-code.108580/
 
 In this repository, we have done a refactoring, translation and correction work from the mentioned source.
 
+## Go server implementation
+
+A cross-platform Go migration is available for the AccountServer and the GameServer core:
+
+```bash
+export MIR_TICKET_SECRET='replace-with-a-long-random-secret'
+go run ./cmd/gameserver -config configs/gameserver.json
+go run ./cmd/accountserver -config configs/accountserver.json
+```
+
+The AccountServer, login-ticket flow, complete packet framing catalog, and character-selection stage are implemented. Map, combat, and other world systems are being migrated incrementally; see [Go architecture and migration status](docs/go-architecture.md) and the [operations runbook](docs/go-runbook.md) for the exact compatibility boundary.
+
 ## 🚀 Getting Started
 
 ### 🖥️ Client & Launcher Setup

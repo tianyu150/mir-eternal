@@ -1,0 +1,19 @@
+{
+  "listen": ":7000",
+  "accounts_directory": "data/accounts",
+  "legacy_servers_file": "",
+  "ticket_port": 6678,
+  "ticket_ttl": "5m",
+  "ticket_secret": "",
+  "max_datagram_bytes": 1024,
+  "workers": 64,
+  "admin_listen": "127.0.0.1:9100",
+  "bcrypt_cost": 10,
+  "servers": [
+    {
+      "name": "Local",
+      "public_address": "127.0.0.1:8701",
+      "ticket_address": "127.0.0.1:6678"
+    }
+  ]
+}

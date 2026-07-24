@@ -11,12 +11,14 @@ import (
 	"time"
 
 	"github.com/tianyu150/mir-eternal/internal/gamestore"
+	"github.com/tianyu150/mir-eternal/internal/gameworld"
 	"github.com/tianyu150/mir-eternal/internal/ticket"
 )
 
 type Server struct {
 	config     Config
 	store      *gamestore.Store
+	world      *gameworld.World
 	codec      ticket.Codec
 	tickets    *ticketStore
 	stats      *Stats
@@ -25,30 +27,49 @@ type Server struct {
 	mu         sync.Mutex
 	sessions   map[*session]struct{}
 	online     map[string]*session
+	worldPeers map[int32]*session
 	listener   net.Listener
 	ticketConn *net.UDPConn
 	wg         sync.WaitGroup
 }
 
-func New(config Config, store *gamestore.Store, stats *Stats, logger *slog.Logger) *Server {
+func New(config Config, store *gamestore.Store, world *gameworld.World, stats *Stats, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{config: config, store: store, codec: ticket.Codec{Secret: []byte(config.TicketSecret)}, tickets: newTicketStore(config.MaxTickets), stats: stats, logger: logger, allowed: config.allowedNetworks(), sessions: make(map[*session]struct{}), online: make(map[string]*session)}
+	return &Server{config: config, store: store, world: world, codec: ticket.Codec{Secret: []byte(config.TicketSecret)}, tickets: newTicketStore(config.MaxTickets), stats: stats, logger: logger, allowed: config.allowedNetworks(), sessions: make(map[*session]struct{}), online: make(map[string]*session), worldPeers: make(map[int32]*session)}
 }
 func (s *Server) Serve(ctx context.Context) error {
+	if s.world == nil {
+		return errors.New("game world is not configured")
+	}
+	worldContext, stopWorld := context.WithCancel(context.Background())
+	worldDone := make(chan error, 1)
+	go func() { worldDone <- s.world.Run(worldContext) }()
+	if err := s.world.WaitReady(ctx); err != nil {
+		stopWorld()
+		<-worldDone
+		return err
+	}
+
 	listener, err := net.Listen("tcp", s.config.Listen)
 	if err != nil {
+		stopWorld()
+		<-worldDone
 		return fmt.Errorf("listen for game clients: %w", err)
 	}
 	ticketAddress, err := net.ResolveUDPAddr("udp", s.config.TicketListen)
 	if err != nil {
 		_ = listener.Close()
+		stopWorld()
+		<-worldDone
 		return fmt.Errorf("resolve ticket listen address: %w", err)
 	}
 	ticketConn, err := net.ListenUDP("udp", ticketAddress)
 	if err != nil {
 		_ = listener.Close()
+		stopWorld()
+		<-worldDone
 		return fmt.Errorf("listen for tickets: %w", err)
 	}
 	s.mu.Lock()
@@ -65,11 +86,20 @@ func (s *Server) Serve(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 	case result = <-errCh:
+	case result = <-worldDone:
+		if result == nil {
+			result = errors.New("game world stopped unexpectedly")
+		}
+		worldDone = nil
 	}
 	_ = listener.Close()
 	_ = ticketConn.Close()
 	s.closeSessions()
 	s.wg.Wait()
+	stopWorld()
+	if worldDone != nil {
+		<-worldDone
+	}
 	if result != nil && !errors.Is(result, net.ErrClosed) && ctx.Err() == nil {
 		return result
 	}
@@ -147,8 +177,13 @@ func (s *Server) ticketSourceAllowed(ip net.IP) bool {
 }
 func (s *Server) removeSession(client *session) {
 	client.close()
+	objectID := client.objectID
+	client.leaveWorld()
 	s.mu.Lock()
 	delete(s.sessions, client)
+	if objectID != 0 && s.worldPeers[objectID] == client {
+		delete(s.worldPeers, objectID)
+	}
 	if client.account != "" && s.online[strings.ToLower(client.account)] == client {
 		delete(s.online, strings.ToLower(client.account))
 		s.stats.authenticated.Add(-1)
@@ -168,6 +203,32 @@ func (s *Server) claimAccount(client *session, account string) bool {
 	s.stats.authenticated.Add(1)
 	return true
 }
+func (s *Server) attachWorld(client *session, objectID int32) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if existing := s.worldPeers[objectID]; existing != nil && existing != client {
+		return false
+	}
+	s.worldPeers[objectID] = client
+	return true
+}
+
+func (s *Server) sendToObjects(objectIDs []int32, packets ...[]byte) {
+	s.mu.Lock()
+	peers := make([]*session, 0, len(objectIDs))
+	for _, objectID := range objectIDs {
+		if peer := s.worldPeers[objectID]; peer != nil {
+			peers = append(peers, peer)
+		}
+	}
+	s.mu.Unlock()
+	for _, peer := range peers {
+		if err := peer.writePackets(packets...); err != nil {
+			peer.close()
+		}
+	}
+}
+
 func (s *Server) closeSessions() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -177,5 +238,9 @@ func (s *Server) closeSessions() {
 }
 func (s *Server) Snapshot() StatsSnapshot {
 	accounts, characters := s.store.Counts()
-	return StatsSnapshot{Connections: s.stats.connections.Load(), Authenticated: s.stats.authenticated.Load(), Tickets: s.stats.tickets.Load(), BytesReceived: s.stats.bytesReceived.Load(), BytesSent: s.stats.bytesSent.Load(), PacketsReceived: s.stats.packetsReceived.Load(), PacketsSent: s.stats.packetsSent.Load(), UnhandledPackets: s.stats.unhandledPackets.Load(), Rejected: s.stats.rejected.Load(), PendingTickets: s.tickets.Len(), Accounts: accounts, Characters: characters}
+	loadedMaps, worldPlayers, activePlayers := 0, 0, 0
+	if s.world != nil {
+		loadedMaps, worldPlayers, activePlayers = s.world.Stats(context.Background())
+	}
+	return StatsSnapshot{Connections: s.stats.connections.Load(), Authenticated: s.stats.authenticated.Load(), Tickets: s.stats.tickets.Load(), BytesReceived: s.stats.bytesReceived.Load(), BytesSent: s.stats.bytesSent.Load(), PacketsReceived: s.stats.packetsReceived.Load(), PacketsSent: s.stats.packetsSent.Load(), UnhandledPackets: s.stats.unhandledPackets.Load(), Rejected: s.stats.rejected.Load(), PendingTickets: s.tickets.Len(), Accounts: accounts, Characters: characters, LoadedMaps: loadedMaps, WorldPlayers: worldPlayers, ActivePlayers: activePlayers}
 }

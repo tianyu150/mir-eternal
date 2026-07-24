@@ -71,3 +71,32 @@ func TestPermanentDeleteLimit(t *testing.T) {
 		t.Fatalf("expected daily limit, got %v", err)
 	}
 }
+
+func TestWorldStatePersistence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "game.json")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	_, _ = store.EnsureAccount(ctx, "Player1")
+	character, err := store.CreateCharacter(ctx, "Player1", CreateCharacter{Name: "Hero"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := WorldState{MapID: 142, PositionX: 855, PositionY: 459, Direction: 2048, CurrentHP: 75, CurrentMP: 25}
+	if err := store.SaveWorldState(ctx, "Player1", character.ID, state); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := reopened.ActiveCharacter(ctx, "Player1", character.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.PositionX != 855 || saved.PositionY != 459 || saved.Direction != 2048 || saved.CurrentHP != 75 || saved.CurrentMP != 25 {
+		t.Fatalf("world state=%+v", saved)
+	}
+}

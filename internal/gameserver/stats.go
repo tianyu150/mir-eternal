@@ -26,4 +26,7 @@ type StatsSnapshot struct {
 	PendingTickets   int   `json:"pending_tickets"`
 	Accounts         int   `json:"accounts"`
 	Characters       int   `json:"characters"`
+	LoadedMaps       int   `json:"loaded_maps"`
+	WorldPlayers     int   `json:"world_players"`
+	ActivePlayers    int   `json:"active_players"`
 }

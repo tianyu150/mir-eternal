@@ -52,6 +52,11 @@ type Character struct {
 	Face      byte            `json:"face"`
 	Level     byte            `json:"level"`
 	MapID     int32           `json:"map_id"`
+	PositionX int32           `json:"position_x"`
+	PositionY int32           `json:"position_y"`
+	Direction uint16          `json:"direction"`
+	CurrentHP int32           `json:"current_hp"`
+	CurrentMP int32           `json:"current_mp"`
 	Status    CharacterStatus `json:"status"`
 	CreatedAt time.Time       `json:"created_at"`
 	OfflineAt time.Time       `json:"offline_at"`
@@ -115,6 +120,20 @@ func Open(path string) (*Store, error) {
 	}
 	if s.data.NextCharacterID < 1 {
 		s.data.NextCharacterID = 1
+	}
+	// Version-1 snapshots created before world-state migration have zero-valued
+	// progression fields. Upgrade them in memory without changing valid data.
+	for id, character := range s.data.Characters {
+		if character.Level == 0 {
+			character.Level = 1
+		}
+		if character.CurrentHP <= 0 {
+			character.CurrentHP = 100
+		}
+		if character.CurrentMP < 0 {
+			character.CurrentMP = 0
+		}
+		s.data.Characters[id] = character
 	}
 	return s, nil
 }
@@ -270,7 +289,7 @@ func (s *Store) CreateCharacter(_ context.Context, account string, request Creat
 			return ErrActiveSlotsFull
 		}
 		now := s.now().UTC()
-		result = Character{ID: data.NextCharacterID, Account: accountData.Name, Name: request.Name, Gender: request.Gender, Race: request.Race, Hair: request.Hair, HairColor: request.HairColor, Face: request.Face, MapID: 142, Status: Active, CreatedAt: now, OfflineAt: now}
+		result = Character{ID: data.NextCharacterID, Account: accountData.Name, Name: request.Name, Gender: request.Gender, Race: request.Race, Hair: request.Hair, HairColor: request.HairColor, Face: request.Face, Level: 1, MapID: 142, CurrentHP: 100, CurrentMP: 100, Status: Active, CreatedAt: now, OfflineAt: now}
 		data.NextCharacterID++
 		data.Characters[result.ID] = result
 		data.Names[normalize(result.Name)] = result.ID
@@ -346,6 +365,37 @@ func (s *Store) DeleteCharacter(_ context.Context, account string, id int32) (Ch
 		return c, nil
 	})
 }
+
+type WorldState struct {
+	MapID     int32
+	PositionX int32
+	PositionY int32
+	Direction uint16
+	CurrentHP int32
+	CurrentMP int32
+}
+
+// SaveWorldState persists the authoritative world state when a character
+// leaves a session. Movement remains in-memory during play to avoid fsync on
+// every step.
+func (s *Store) SaveWorldState(_ context.Context, account string, id int32, state WorldState) error {
+	return s.mutate(func(data *database) error {
+		character, ok := data.Characters[id]
+		if !ok || !strings.EqualFold(character.Account, account) || character.Status != Active {
+			return ErrCharacterNotFound
+		}
+		character.MapID = state.MapID
+		character.PositionX = state.PositionX
+		character.PositionY = state.PositionY
+		character.Direction = state.Direction
+		character.CurrentHP = state.CurrentHP
+		character.CurrentMP = state.CurrentMP
+		character.OfflineAt = s.now().UTC()
+		data.Characters[id] = character
+		return nil
+	})
+}
+
 func (s *Store) ActiveCharacter(_ context.Context, account string, id int32) (Character, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

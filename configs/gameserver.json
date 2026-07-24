@@ -3,8 +3,13 @@
   "ticket_listen": ":6678",
   "ticket_secret": "",
   "ticket_ttl": "5m",
-  "ticket_allowed_cidrs": ["127.0.0.0/8"],
+  "ticket_allowed_cidrs": [
+    "127.0.0.0/8"
+  ],
   "database_path": "data/game/game.json",
+  "system_data_path": "Database/System",
+  "view_range": 20,
+  "max_terrain_cells": 16000000,
   "admin_listen": "127.0.0.1:9101",
   "max_connections": 10000,
   "max_packet_bytes": 1048576,

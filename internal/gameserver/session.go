@@ -14,6 +14,7 @@ import (
 
 	"github.com/tianyu150/mir-eternal/internal/gameprotocol"
 	"github.com/tianyu150/mir-eternal/internal/gamestore"
+	"github.com/tianyu150/mir-eternal/internal/gameworld"
 )
 
 type stage uint8
@@ -34,6 +35,7 @@ type session struct {
 	stage        stage
 	account, mac string
 	characterID  int32
+	objectID     int32
 }
 
 func newSession(server *Server, conn net.Conn) *session {
@@ -88,12 +90,27 @@ func (s *session) handle(ctx context.Context, frame gameprotocol.Frame) error {
 	if frame.ID() == 1007 {
 		return s.handlePing(frame)
 	}
-	if s.stage == loadingScene && (frame.ID() == 642 || frame.ID() == 271) {
-		s.stage = playingScene
-		return nil
+	if s.stage == loadingScene && (frame.ID() == 12 || frame.ID() == 642) {
+		return s.handleEnterScene(ctx)
 	}
-	// Framing for the complete catalog is available. World/map handlers are
-	// intentionally migrated behind this dispatch point in subsequent slices.
+	if s.stage == playingScene {
+		switch frame.ID() {
+		case 10:
+			return s.handleChangeCharacter(ctx)
+		case 14:
+			return s.handlePositionSync()
+		case 16:
+			return s.handleRotate(ctx, frame)
+		case 17:
+			return s.handleMove(ctx, frame, true)
+		case 18:
+			return s.handleMove(ctx, frame, false)
+		case 271:
+			return nil
+		}
+	}
+	// The complete catalog can be framed safely. Remaining domain handlers are
+	// migrated incrementally and are counted instead of returning false success.
 	s.server.stats.unhandledPackets.Add(1)
 	return nil
 }
@@ -233,6 +250,9 @@ func (s *session) handleEnter(ctx context.Context, frame gameprotocol.Frame) err
 	if err != nil {
 		return err
 	}
+	if s.objectID != 0 {
+		return errors.New("character is already in world")
+	}
 	character, err := s.server.store.ActiveCharacter(ctx, s.account, id)
 	if err != nil {
 		packet, _ := loginErrorPacket(284, 0, 0)
@@ -242,17 +262,222 @@ func (s *session) handleEnter(ctx context.Context, frame gameprotocol.Frame) err
 		packet, _ := loginErrorPacket(285, protocolTime(character.BanUntil), 0)
 		return s.writePackets(packet)
 	}
-	packet, err := integerPacket(1003, id)
+	currentHP := character.CurrentHP
+	if currentHP <= 0 {
+		currentHP = 100
+	}
+	currentMP := character.CurrentMP
+	if currentMP < 0 {
+		currentMP = 0
+	}
+	player, err := s.server.world.Join(ctx, gameworld.Player{ObjectID: character.ID, CharacterID: character.ID, Account: s.account, Name: character.Name, MapID: character.MapID, Position: gameworld.Point{X: character.PositionX, Y: character.PositionY}, Direction: character.Direction, Race: character.Race, Gender: character.Gender, Hair: character.Hair, HairColor: character.HairColor, Face: character.Face, Level: character.Level, CurrentHP: currentHP, MaxHP: 100, CurrentMP: currentMP, MaxMP: 100})
+	if err != nil {
+		packet, _ := loginErrorPacket(284, 0, 0)
+		_ = s.writePackets(packet)
+		return nil
+	}
+	if !s.server.attachWorld(s, player.ObjectID) {
+		_, _ = s.server.world.Leave(ctx, player.ObjectID)
+		return errors.New("world object is already connected")
+	}
+	s.characterID, s.objectID = id, player.ObjectID
+	answer, err := integerPacket(1003, id)
+	if err != nil {
+		return err
+	}
+	syncCharacter, err := syncCharacterPacket(player)
+	if err != nil {
+		return err
+	}
+	endSync, err := endSyncPacket(id)
+	if err != nil {
+		return err
+	}
+	if err := s.writePackets(answer, syncCharacter, endSync); err != nil {
+		return err
+	}
+	s.stage = loadingScene
+	return nil
+}
+func (s *session) handleEnterScene(ctx context.Context) error {
+	activation, err := s.server.world.Activate(ctx, s.objectID)
+	if err != nil {
+		return err
+	}
+	stop, err := stopPacket(activation.Player)
+	if err != nil {
+		return err
+	}
+	enter, err := enterScenePacket(activation.Player)
+	if err != nil {
+		return err
+	}
+	selfVisible, err := objectVisiblePacket(activation.Player)
+	if err != nil {
+		return err
+	}
+	hp, err := objectHPPacket(activation.Player)
+	if err != nil {
+		return err
+	}
+	mp, err := objectMPPacket(activation.Player)
+	if err != nil {
+		return err
+	}
+	packets := [][]byte{stop, enter, selfVisible, hp, mp}
+	observerIDs := make([]int32, 0, len(activation.Visible))
+	for _, visible := range activation.Visible {
+		visiblePackets, err := visibleObjectPackets(visible)
+		if err != nil {
+			return err
+		}
+		packets = append(packets, visiblePackets...)
+		observerIDs = append(observerIDs, visible.ObjectID)
+	}
+	if err := s.writePackets(packets...); err != nil {
+		return err
+	}
+	appearance, err := visibleObjectPackets(activation.Player)
+	if err != nil {
+		return err
+	}
+	s.server.sendToObjects(observerIDs, appearance...)
+	s.stage = playingScene
+	return nil
+}
+
+func (s *session) handlePositionSync() error {
+	// Packet 14 is client telemetry. Never trust it as authoritative state.
+	// Return the current world position through the standard stop packet.
+	if s.objectID == 0 {
+		return gameworld.ErrPlayerNotFound
+	}
+	player, err := s.server.world.Player(context.Background(), s.objectID)
+	if err != nil {
+		return err
+	}
+	packet, err := stopPacket(player)
+	if err != nil {
+		return err
+	}
+	return s.writePackets(packet)
+}
+
+func (s *session) handleRotate(ctx context.Context, frame gameprotocol.Frame) error {
+	if len(frame.Data) != 8 {
+		return errors.New("invalid rotation packet")
+	}
+	direction := uint16(int16(binary.LittleEndian.Uint16(frame.Data[2:4])))
+	rotation, err := s.server.world.Rotate(ctx, s.objectID, direction)
+	if err != nil {
+		return err
+	}
+	packet, err := rotationPacket(rotation)
 	if err != nil {
 		return err
 	}
 	if err := s.writePackets(packet); err != nil {
 		return err
 	}
-	s.characterID = id
-	s.stage = loadingScene
+	s.server.sendToObjects(rotation.Observers, packet)
 	return nil
 }
+
+func (s *session) handleMove(ctx context.Context, frame gameprotocol.Frame, run bool) error {
+	if len(frame.Data) != 6 {
+		return errors.New("invalid movement packet")
+	}
+	target := readPoint(frame.Data, 2, run)
+	movement, err := s.server.world.Move(ctx, s.objectID, target, run)
+	if err != nil {
+		return err
+	}
+	packet, err := movementPacket(movement)
+	if err != nil {
+		return err
+	}
+	if err := s.writePackets(packet); err != nil {
+		return err
+	}
+	if movement.Kind == gameworld.MoveStopped {
+		return nil
+	}
+	s.server.sendToObjects(movement.Observers, packet)
+	for _, entered := range movement.Entered {
+		packets, err := visibleObjectPackets(entered)
+		if err != nil {
+			return err
+		}
+		if err := s.writePackets(packets...); err != nil {
+			return err
+		}
+		selfPackets, err := visibleObjectPackets(movement.Player)
+		if err != nil {
+			return err
+		}
+		s.server.sendToObjects([]int32{entered.ObjectID}, selfPackets...)
+	}
+	for _, left := range movement.Left {
+		outOther, err := objectOutPacket(left.ObjectID)
+		if err != nil {
+			return err
+		}
+		if err := s.writePackets(outOther); err != nil {
+			return err
+		}
+		outSelf, err := objectOutPacket(movement.Player.ObjectID)
+		if err != nil {
+			return err
+		}
+		s.server.sendToObjects([]int32{left.ObjectID}, outSelf)
+	}
+	return nil
+}
+
+func (s *session) handleChangeCharacter(ctx context.Context) error {
+	s.leaveWorld()
+	changed, err := gameprotocol.Build(1009, nil)
+	if err != nil {
+		return err
+	}
+	characters, err := s.server.store.ListCharacters(ctx, s.account)
+	if err != nil {
+		return err
+	}
+	list, err := characterListPacket(characters)
+	if err != nil {
+		return err
+	}
+	if err := s.writePackets(changed, list); err != nil {
+		return err
+	}
+	s.stage = selectingCharacter
+	return nil
+}
+
+func (s *session) leaveWorld() {
+	if s.objectID == 0 || s.server.world == nil {
+		return
+	}
+	objectID := s.objectID
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	departure, err := s.server.world.Leave(ctx, objectID)
+	if err == nil {
+		_ = s.server.store.SaveWorldState(ctx, s.account, s.characterID, gamestore.WorldState{MapID: departure.Player.MapID, PositionX: departure.Player.Position.X, PositionY: departure.Player.Position.Y, Direction: departure.Player.Direction, CurrentHP: departure.Player.CurrentHP, CurrentMP: departure.Player.CurrentMP})
+		out, packetErr := objectOutPacket(objectID)
+		if packetErr == nil {
+			s.server.sendToObjects(departure.Observers, out)
+		}
+	}
+	s.server.mu.Lock()
+	if s.server.worldPeers[objectID] == s {
+		delete(s.server.worldPeers, objectID)
+	}
+	s.server.mu.Unlock()
+	s.objectID, s.characterID = 0, 0
+}
+
 func (s *session) handlePing(frame gameprotocol.Frame) error {
 	if len(frame.Data) != 6 {
 		return errors.New("invalid ping packet")

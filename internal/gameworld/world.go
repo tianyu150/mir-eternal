@@ -1,0 +1,477 @@
+package gameworld
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
+)
+
+type mapInstance struct {
+	data     *MapData
+	players  map[int32]*Player
+	occupied map[Point]int32
+}
+
+type worldState struct {
+	maps    map[int32]*mapInstance
+	players map[int32]*Player
+}
+
+type command interface{ apply(*World, *worldState) }
+
+type World struct {
+	catalog   *Catalog
+	viewRange int32
+	commands  chan command
+	ready     chan struct{}
+	done      chan struct{}
+	startOnce sync.Once
+	stopOnce  sync.Once
+	running   atomic.Bool
+}
+
+func New(catalog *Catalog, viewRange int32) *World {
+	if viewRange <= 0 {
+		viewRange = 20
+	}
+	return &World{catalog: catalog, viewRange: viewRange, commands: make(chan command, 1024), ready: make(chan struct{}), done: make(chan struct{})}
+}
+
+func (w *World) Run(ctx context.Context) error {
+	started := false
+	w.startOnce.Do(func() { started = true })
+	if !started {
+		return errors.New("game world can only be run once")
+	}
+	w.running.Store(true)
+	close(w.ready)
+	defer func() {
+		w.running.Store(false)
+		w.stopOnce.Do(func() { close(w.done) })
+	}()
+	state := &worldState{maps: make(map[int32]*mapInstance), players: make(map[int32]*Player)}
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case command := <-w.commands:
+			command.apply(w, state)
+		}
+	}
+}
+
+func (w *World) WaitReady(ctx context.Context) error {
+	select {
+	case <-w.ready:
+		return nil
+	case <-w.done:
+		return ErrNotRunning
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (w *World) submit(ctx context.Context, command command) error {
+	if !w.running.Load() {
+		return ErrNotRunning
+	}
+	select {
+	case <-w.done:
+		return ErrNotRunning
+	default:
+	}
+	select {
+	case w.commands <- command:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-w.done:
+		return ErrNotRunning
+	}
+}
+
+type joinResponse struct {
+	player Player
+	err    error
+}
+type joinCommand struct {
+	player   Player
+	response chan joinResponse
+}
+
+func (c joinCommand) apply(w *World, state *worldState) {
+	if _, exists := state.players[c.player.ObjectID]; exists {
+		c.response <- joinResponse{err: ErrPlayerExists}
+		return
+	}
+	data, err := w.catalog.Load(c.player.MapID)
+	if err != nil {
+		c.response <- joinResponse{err: err}
+		return
+	}
+	instance := state.maps[c.player.MapID]
+	if instance == nil {
+		instance = &mapInstance{data: data, players: make(map[int32]*Player), occupied: make(map[Point]int32)}
+		state.maps[c.player.MapID] = instance
+	}
+	if len(instance.players) >= data.Spec.LimitPlayers {
+		c.response <- joinResponse{err: ErrMapFull}
+		return
+	}
+	player := c.player
+	player.RouteID = 1
+	player.Active = false
+	if !data.Terrain.CanPass(player.Position) {
+		player.Position = instance.spawn(player.ObjectID)
+	}
+	player.Altitude = data.Terrain.Altitude(player.Position)
+	state.players[player.ObjectID] = &player
+	instance.players[player.ObjectID] = &player
+	c.response <- joinResponse{player: player}
+}
+
+func (w *World) Join(ctx context.Context, player Player) (Player, error) {
+	if err := player.Validate(); err != nil {
+		return Player{}, err
+	}
+	response := make(chan joinResponse, 1)
+	if err := w.submit(ctx, joinCommand{player: player, response: response}); err != nil {
+		return Player{}, err
+	}
+	select {
+	case result := <-response:
+		return result.player, result.err
+	case <-ctx.Done():
+		return Player{}, ctx.Err()
+	case <-w.done:
+		return Player{}, ErrNotRunning
+	}
+}
+
+type activationResponse struct {
+	result Activation
+	err    error
+}
+type activateCommand struct {
+	objectID int32
+	response chan activationResponse
+}
+
+func (c activateCommand) apply(w *World, state *worldState) {
+	player := state.players[c.objectID]
+	if player == nil {
+		c.response <- activationResponse{err: ErrPlayerNotFound}
+		return
+	}
+	if player.Active {
+		c.response <- activationResponse{result: Activation{Player: *player, Visible: visiblePlayers(state.maps[player.MapID], *player, w.viewRange)}}
+		return
+	}
+	instance := state.maps[player.MapID]
+	if !instance.canOccupy(player.Position, player.ObjectID) {
+		player.Position = instance.spawn(player.ObjectID)
+	}
+	player.Altitude = instance.data.Terrain.Altitude(player.Position)
+	player.Active = true
+	instance.occupied[player.Position] = player.ObjectID
+	c.response <- activationResponse{result: Activation{Player: *player, Visible: visiblePlayers(instance, *player, w.viewRange)}}
+}
+func (w *World) Activate(ctx context.Context, objectID int32) (Activation, error) {
+	response := make(chan activationResponse, 1)
+	if err := w.submit(ctx, activateCommand{objectID, response}); err != nil {
+		return Activation{}, err
+	}
+	select {
+	case result := <-response:
+		return result.result, result.err
+	case <-ctx.Done():
+		return Activation{}, ctx.Err()
+	case <-w.done:
+		return Activation{}, ErrNotRunning
+	}
+}
+
+type departureResponse struct {
+	result Departure
+	err    error
+}
+type leaveCommand struct {
+	objectID int32
+	response chan departureResponse
+}
+
+func (c leaveCommand) apply(w *World, state *worldState) {
+	player := state.players[c.objectID]
+	if player == nil {
+		c.response <- departureResponse{err: ErrPlayerNotFound}
+		return
+	}
+	instance := state.maps[player.MapID]
+	observers := visibleIDs(instance, *player, w.viewRange)
+	if player.Active {
+		delete(instance.occupied, player.Position)
+	}
+	delete(instance.players, player.ObjectID)
+	delete(state.players, player.ObjectID)
+	c.response <- departureResponse{result: Departure{Player: *player, Observers: observers}}
+}
+func (w *World) Leave(ctx context.Context, objectID int32) (Departure, error) {
+	response := make(chan departureResponse, 1)
+	if err := w.submit(ctx, leaveCommand{objectID, response}); err != nil {
+		return Departure{}, err
+	}
+	select {
+	case result := <-response:
+		return result.result, result.err
+	case <-ctx.Done():
+		return Departure{}, ctx.Err()
+	case <-w.done:
+		return Departure{}, ErrNotRunning
+	}
+}
+
+type moveResponse struct {
+	result Movement
+	err    error
+}
+type moveCommand struct {
+	objectID int32
+	target   Point
+	run      bool
+	response chan moveResponse
+}
+
+func (c moveCommand) apply(w *World, state *worldState) {
+	player := state.players[c.objectID]
+	if player == nil {
+		c.response <- moveResponse{err: ErrPlayerNotFound}
+		return
+	}
+	if !player.Active {
+		c.response <- moveResponse{err: ErrPlayerNotActive}
+		return
+	}
+	instance := state.maps[player.MapID]
+	from := player.Position
+	if c.target == from {
+		c.response <- moveResponse{result: Movement{Player: *player, From: from, To: from, Kind: MoveStopped}}
+		return
+	}
+	before := visibleMap(instance, *player, w.viewRange)
+	direction := Direction(from, c.target)
+	player.Direction = direction
+	first := Step(from, direction, 1)
+	kind := MoveWalked
+	destination := first
+	if !instance.canOccupy(first, player.ObjectID) {
+		c.response <- moveResponse{result: Movement{Player: *player, From: from, To: from, Kind: MoveStopped}}
+		return
+	}
+	if c.run {
+		second := Step(from, direction, 2)
+		if instance.canOccupy(second, player.ObjectID) {
+			destination = second
+			kind = MoveRan
+		}
+	}
+	delete(instance.occupied, from)
+	player.Position = destination
+	player.Altitude = instance.data.Terrain.Altitude(destination)
+	instance.occupied[destination] = player.ObjectID
+	after := visibleMap(instance, *player, w.viewRange)
+	result := Movement{Player: *player, From: from, To: destination, Kind: kind}
+	for id, other := range after {
+		if _, wasVisible := before[id]; wasVisible {
+			result.Observers = append(result.Observers, id)
+		} else {
+			result.Entered = append(result.Entered, *other)
+		}
+	}
+	for id, other := range before {
+		if _, stillVisible := after[id]; !stillVisible {
+			result.Left = append(result.Left, *other)
+		}
+	}
+	c.response <- moveResponse{result: result}
+}
+func (w *World) Move(ctx context.Context, objectID int32, target Point, run bool) (Movement, error) {
+	response := make(chan moveResponse, 1)
+	if err := w.submit(ctx, moveCommand{objectID, target, run, response}); err != nil {
+		return Movement{}, err
+	}
+	select {
+	case result := <-response:
+		return result.result, result.err
+	case <-ctx.Done():
+		return Movement{}, ctx.Err()
+	case <-w.done:
+		return Movement{}, ErrNotRunning
+	}
+}
+
+type rotationResponse struct {
+	result Rotation
+	err    error
+}
+type rotateCommand struct {
+	objectID  int32
+	direction uint16
+	response  chan rotationResponse
+}
+
+func (c rotateCommand) apply(w *World, state *worldState) {
+	if !validDirection(c.direction) {
+		c.response <- rotationResponse{err: ErrInvalidDirection}
+		return
+	}
+	player := state.players[c.objectID]
+	if player == nil {
+		c.response <- rotationResponse{err: ErrPlayerNotFound}
+		return
+	}
+	if !player.Active {
+		c.response <- rotationResponse{err: ErrPlayerNotActive}
+		return
+	}
+	player.Direction = c.direction
+	c.response <- rotationResponse{result: Rotation{Player: *player, Observers: visibleIDs(state.maps[player.MapID], *player, w.viewRange)}}
+}
+func (w *World) Rotate(ctx context.Context, objectID int32, direction uint16) (Rotation, error) {
+	response := make(chan rotationResponse, 1)
+	if err := w.submit(ctx, rotateCommand{objectID, direction, response}); err != nil {
+		return Rotation{}, err
+	}
+	select {
+	case result := <-response:
+		return result.result, result.err
+	case <-ctx.Done():
+		return Rotation{}, ctx.Err()
+	case <-w.done:
+		return Rotation{}, ErrNotRunning
+	}
+}
+
+type statsResponse struct{ maps, players, active int }
+type statsCommand struct{ response chan statsResponse }
+
+func (c statsCommand) apply(_ *World, state *worldState) {
+	result := statsResponse{maps: len(state.maps), players: len(state.players)}
+	for _, player := range state.players {
+		if player.Active {
+			result.active++
+		}
+	}
+	c.response <- result
+}
+func (w *World) Stats(ctx context.Context) (maps, players, active int) {
+	response := make(chan statsResponse, 1)
+	if err := w.submit(ctx, statsCommand{response}); err != nil {
+		return 0, 0, 0
+	}
+	select {
+	case result := <-response:
+		return result.maps, result.players, result.active
+	case <-ctx.Done():
+		return 0, 0, 0
+	case <-w.done:
+		return 0, 0, 0
+	}
+}
+
+func (instance *mapInstance) canOccupy(point Point, objectID int32) bool {
+	if !instance.data.Terrain.CanPass(point) {
+		return false
+	}
+	occupant, occupied := instance.occupied[point]
+	return !occupied || occupant == objectID
+}
+func (instance *mapInstance) spawn(seed int32) Point {
+	points := instance.data.Resurrection
+	if len(points) > 0 {
+		start := int(seed)
+		if start < 0 {
+			start = -start
+		}
+		for offset := 0; offset < len(points); offset++ {
+			point := points[(start+offset)%len(points)]
+			if instance.canOccupy(point, seed) {
+				return point
+			}
+		}
+	}
+	for x := instance.data.Terrain.Start.X; x < instance.data.Terrain.End.X; x++ {
+		for y := instance.data.Terrain.Start.Y; y < instance.data.Terrain.End.Y; y++ {
+			point := Point{X: x, Y: y}
+			if instance.canOccupy(point, seed) {
+				return point
+			}
+		}
+	}
+	return instance.data.Terrain.Start
+}
+func visibleMap(instance *mapInstance, player Player, distance int32) map[int32]*Player {
+	result := make(map[int32]*Player)
+	for id, other := range instance.players {
+		if id != player.ObjectID && other.Active && GridDistance(player.Position, other.Position) <= distance {
+			result[id] = other
+		}
+	}
+	return result
+}
+func visiblePlayers(instance *mapInstance, player Player, distance int32) []Player {
+	visible := visibleMap(instance, player, distance)
+	result := make([]Player, 0, len(visible))
+	for _, other := range visible {
+		result = append(result, *other)
+	}
+	return result
+}
+func visibleIDs(instance *mapInstance, player Player, distance int32) []int32 {
+	visible := visibleMap(instance, player, distance)
+	result := make([]int32, 0, len(visible))
+	for id := range visible {
+		result = append(result, id)
+	}
+	return result
+}
+
+func (p Player) Validate() error {
+	if p.ObjectID <= 0 || p.CharacterID <= 0 || p.MapID <= 0 || p.Name == "" {
+		return fmt.Errorf("invalid world player")
+	}
+	return nil
+}
+
+type playerResponse struct {
+	player Player
+	err    error
+}
+type playerCommand struct {
+	objectID int32
+	response chan playerResponse
+}
+
+func (c playerCommand) apply(_ *World, state *worldState) {
+	player := state.players[c.objectID]
+	if player == nil {
+		c.response <- playerResponse{err: ErrPlayerNotFound}
+		return
+	}
+	c.response <- playerResponse{player: *player}
+}
+func (w *World) Player(ctx context.Context, objectID int32) (Player, error) {
+	response := make(chan playerResponse, 1)
+	if err := w.submit(ctx, playerCommand{objectID, response}); err != nil {
+		return Player{}, err
+	}
+	select {
+	case result := <-response:
+		return result.player, result.err
+	case <-ctx.Done():
+		return Player{}, ctx.Err()
+	case <-w.done:
+		return Player{}, ErrNotRunning
+	}
+}

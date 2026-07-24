@@ -17,8 +17,11 @@ type Config struct {
 	TicketTTLText      string        `json:"ticket_ttl"`
 	TicketAllowedCIDRs []string      `json:"ticket_allowed_cidrs"`
 	DatabasePath       string        `json:"database_path"`
+	SystemDataPath     string        `json:"system_data_path"`
 	AdminListen        string        `json:"admin_listen"`
 	MaxConnections     int           `json:"max_connections"`
+	ViewRange          int32         `json:"view_range"`
+	MaxTerrainCells    int64         `json:"max_terrain_cells"`
 	MaxPacketBytes     uint32        `json:"max_packet_bytes"`
 	MaxTickets         int           `json:"max_tickets"`
 	LoginTimeout       time.Duration `json:"-"`
@@ -28,7 +31,7 @@ type Config struct {
 }
 
 func DefaultConfig() Config {
-	return Config{Listen: ":8701", TicketListen: ":6678", TicketTTL: 5 * time.Minute, TicketTTLText: "5m", DatabasePath: "data/game/game.json", AdminListen: "127.0.0.1:9101", MaxConnections: 10000, MaxPacketBytes: 1 << 20, MaxTickets: 100000, LoginTimeout: 30 * time.Second, LoginTimeoutText: "30s", IdleTimeout: 5 * time.Minute, IdleTimeoutText: "5m"}
+	return Config{Listen: ":8701", TicketListen: ":6678", TicketTTL: 5 * time.Minute, TicketTTLText: "5m", DatabasePath: "data/game/game.json", SystemDataPath: "Database/System", AdminListen: "127.0.0.1:9101", MaxConnections: 10000, ViewRange: 20, MaxTerrainCells: 16_000_000, MaxPacketBytes: 1 << 20, MaxTickets: 100000, LoginTimeout: 30 * time.Second, LoginTimeoutText: "30s", IdleTimeout: 5 * time.Minute, IdleTimeoutText: "5m"}
 }
 func LoadConfig(path string) (Config, error) {
 	cfg := DefaultConfig()
@@ -68,11 +71,14 @@ func (c Config) Validate() error {
 	if c.Listen == "" || c.TicketListen == "" {
 		return errors.New("listen and ticket_listen are required")
 	}
-	if c.DatabasePath == "" {
-		return errors.New("database_path is required")
+	if c.DatabasePath == "" || c.SystemDataPath == "" {
+		return errors.New("database_path and system_data_path are required")
 	}
 	if c.MaxConnections < 1 || c.MaxTickets < 1 {
 		return errors.New("max_connections and max_tickets must be positive")
+	}
+	if c.ViewRange < 1 || c.ViewRange > 100 || c.MaxTerrainCells < 1 {
+		return errors.New("view_range must be between 1 and 100 and max_terrain_cells must be positive")
 	}
 	if c.MaxPacketBytes < 162 || c.MaxPacketBytes > 64<<20 {
 		return errors.New("max_packet_bytes must be between 162 and 67108864")

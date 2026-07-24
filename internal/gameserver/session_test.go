@@ -20,7 +20,7 @@ func TestSessionTicketLogin(t *testing.T) {
 	}
 	config := DefaultConfig()
 	config.MaxPacketBytes = 1024
-	server := New(config, store, &Stats{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server := New(config, store, nil, &Stats{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	server.tickets.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
 	if err := server.tickets.Add("ULS21-test", "Player1", time.Unix(1_700_000_060, 0)); err != nil {
 		t.Fatal(err)

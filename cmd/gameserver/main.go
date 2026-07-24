@@ -10,6 +10,7 @@ import (
 
 	"github.com/tianyu150/mir-eternal/internal/gameserver"
 	"github.com/tianyu150/mir-eternal/internal/gamestore"
+	"github.com/tianyu150/mir-eternal/internal/gameworld"
 	"github.com/tianyu150/mir-eternal/internal/observability"
 )
 
@@ -31,8 +32,13 @@ func run(configPath string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	catalog, err := gameworld.OpenCatalog(config.SystemDataPath, config.MaxTerrainCells)
+	if err != nil {
+		return err
+	}
+	world := gameworld.New(catalog, config.ViewRange)
 	stats := &gameserver.Stats{}
-	server := gameserver.New(config, store, stats, logger)
+	server := gameserver.New(config, store, world, stats, logger)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	errCh := make(chan error, 2)

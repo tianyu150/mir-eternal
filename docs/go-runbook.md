@@ -4,6 +4,7 @@
 
 - Go 1.25 或更高版本；
 - 与当前仓库兼容的 Legend Eternal 客户端；
+- `Database/System/GameMap` 下的地图、区域和 terrain 数据；
 - UDP 7000、UDP 6678 和 TCP 8701 可用。
 
 ## 本地运行
@@ -28,7 +29,7 @@ make build
 
 ```text
 data/accounts/       与旧 C# AccountServer 文件兼容
-data/game/game.json  Go GameServer 角色选择数据库
+data/game/game.json  Go GameServer 角色及离线世界状态数据库
 ```
 
 迁移旧账号时，停止旧 AccountServer，将原 `Accounts` 目录复制到 `data/accounts`。建议先备份；Go 服务会在旧明文账号登录后更新对应文件。

@@ -12,8 +12,9 @@ internal/account/        账号领域、BCrypt 和旧 JSON 仓储
 internal/accountserver/  启动器 UDP 协议及服务器
 internal/ticket/         一次性登录票据和 HMAC 内部协议
 internal/gameprotocol/   TCP 拆包、组包、XOR 和 525 个协议描述
-internal/gamestore/      游戏账号及角色选择数据持久化
-internal/gameserver/     票据接收、会话状态机和角色选择处理
+internal/gamestore/      游戏账号、角色及离线位置持久化
+internal/gameworld/      地形、地图 Actor、AOI 和权威移动
+internal/gameserver/     票据、会话、角色选择和世界协议适配
 internal/observability/  健康检查和运行统计
 configs/                 本地配置
 deploy/                  Docker 和 Compose 配置
@@ -56,7 +57,10 @@ Client   -- TCP/8701 --> GameServer --> character database
 - 一次性票据、过期清理、容量限制和来源 CIDR 限制。
 - 登录、角色列表、创建、软删除、恢复、永久删除、进入游戏及 Ping。
 - 原 C# 登录协议块、角色列表模板和 94 字节角色描述布局。
-- 版本化、原子提交的账号/角色持久化。
+- 读取旧 `.terrain` 矩阵、地图定义、复活区域、通行标记和地形高度。
+- 单 Actor 世界状态、地图人数限制、占位碰撞和 Chebyshev AOI。
+- 权威走路、跑步、转向、位置纠正以及玩家出现/消失广播。
+- 角色离线时原子保存地图、坐标、方向、HP 和 MP。
 
 ### 协议
 
@@ -76,15 +80,15 @@ go generate ./internal/gameprotocol
 
 下面的 C# 世界逻辑尚未宣称完成：
 
-- 地图实例、AOI 和地图主循环；
-- 玩家、怪物、宠物、守卫和陷阱对象；
-- 移动、战斗、技能、Buff 和掉落；
+- 地图事件、传送门、副本和定时活动；
+- 怪物、宠物、守卫、NPC、物品和陷阱对象；
+- 战斗、技能、Buff、掉落和完整玩家属性；
 - 背包、装备、商店和仓库；
 - NPC、任务、组队、好友、师徒和邮件；
 - 公会、攻城、竞技场和 GM 命令；
 - 旧 GameServer 用户数据库的完整导入。
 
-这些数据包已经可以安全拆包，但在业务处理器迁移前会增加 `unhandled_packets`，不会伪造成功响应。后续业务应按领域注册到 `session.handle` 的分发边界，并为每个状态转换增加协议夹具测试。
+这些数据包已经可以安全拆包，但在业务处理器迁移前会增加 `unhandled_packets`，不会伪造成功响应。世界写操作必须通过 `gameworld.World` 的命令通道串行执行，网络会话只负责验证阶段、转换协议和投递世界事件；后续领域也应保持这一边界并增加协议夹具测试。
 
 ## 数据一致性
 

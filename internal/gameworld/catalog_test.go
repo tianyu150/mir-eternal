@@ -3,6 +3,7 @@ package gameworld
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,16 +12,43 @@ import (
 func makeTestCatalog(t *testing.T) *Catalog {
 	t.Helper()
 	root := t.TempDir()
-	for _, directory := range []string{"GameMap/Maps", "GameMap/Terrains", "GameMap/MapAreas"} {
+	for _, directory := range []string{"GameMap/Maps", "GameMap/Terrains", "GameMap/MapAreas", "GameMap/TeleportGates"} {
 		if err := os.MkdirAll(filepath.Join(root, directory), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	mapJSON := `{"MapId":142,"MapName":"Test","TerrainFile":"0142-Test","LimitPlayers":10}`
-	if err := os.WriteFile(filepath.Join(root, "GameMap/Maps/142-Test.txt"), []byte(mapJSON), 0o600); err != nil {
+	writeTestMap(t, root, 142, 10, 0)
+	writeTestMap(t, root, 143, 10, 5)
+	areaJSON := `{"FromMapId":142,"FromCoords":"1, 1","AreaType":"复活区域","RangeCoords":["1, 1","1, 2"]}`
+	if err := os.WriteFile(filepath.Join(root, "GameMap/MapAreas/142-Spawn.txt"), []byte(areaJSON), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	file, err := os.Create(filepath.Join(root, "GameMap/Terrains/0142-Test.terrain"))
+	gateJSON := `{"TeleportGateNumber":1,"FromMapId":142,"ToMapId":143,"TeleportGateName":"Test Gate","FromCoords":"2, 2","ToCoords":"7, 7"}`
+	if err := os.WriteFile(filepath.Join(root, "GameMap/TeleportGates/142-1-Test.txt"), []byte(gateJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sameMapGateJSON := `{"TeleportGateNumber":2,"FromMapId":142,"ToMapId":142,"TeleportGateName":"Local Gate","FromCoords":"3, 3","ToCoords":"8, 8"}`
+	if err := os.WriteFile(filepath.Join(root, "GameMap/TeleportGates/142-2-Test.txt"), []byte(sameMapGateJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	distantGateJSON := `{"TeleportGateNumber":3,"FromMapId":142,"ToMapId":142,"TeleportGateName":"Distant Gate","FromCoords":"0, 0","ToCoords":"1, 1"}`
+	if err := os.WriteFile(filepath.Join(root, "GameMap/TeleportGates/142-3-Test.txt"), []byte(distantGateJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := OpenCatalog(root, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return catalog
+}
+
+func writeTestMap(t *testing.T, root string, mapID, limit int, minLevel byte) {
+	t.Helper()
+	mapJSON := fmt.Sprintf(`{"MapId":%d,"MapName":"Test %d","TerrainFile":"%04d-Test","LimitPlayers":%d,"MinLevel":%d}`, mapID, mapID, mapID, limit, minLevel)
+	if err := os.WriteFile(filepath.Join(root, "GameMap/Maps", fmt.Sprintf("%d-Test.txt", mapID)), []byte(mapJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Create(filepath.Join(root, "GameMap/Terrains", fmt.Sprintf("%04d-Test.terrain", mapID)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,15 +67,6 @@ func makeTestCatalog(t *testing.T) *Catalog {
 	if err := file.Close(); err != nil {
 		t.Fatal(err)
 	}
-	areaJSON := `{"FromMapId":142,"FromCoords":"1, 1","AreaType":"复活区域","RangeCoords":["1, 1","1, 2"]}`
-	if err := os.WriteFile(filepath.Join(root, "GameMap/MapAreas/142-Spawn.txt"), []byte(areaJSON), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	catalog, err := OpenCatalog(root, 1000)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return catalog
 }
 
 func TestCatalogLoadsLegacyTerrain(t *testing.T) {
@@ -56,7 +75,7 @@ func TestCatalogLoadsLegacyTerrain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if data.Spec.MapName != "Test" || data.Terrain.Width != 10 || data.Terrain.Height != 10 {
+	if data.Spec.MapName != "Test 142" || data.Terrain.Width != 10 || data.Terrain.Height != 10 {
 		t.Fatalf("unexpected map data: %+v", data)
 	}
 	if !data.Terrain.CanPass(Point{2, 3}) || data.Terrain.CanPass(Point{5, 5}) {
@@ -67,6 +86,20 @@ func TestCatalogLoadsLegacyTerrain(t *testing.T) {
 	}
 	if len(data.Resurrection) != 3 {
 		t.Fatalf("spawn points=%v", data.Resurrection)
+	}
+}
+
+func TestCatalogLoadsTeleportGate(t *testing.T) {
+	catalog := makeTestCatalog(t)
+	gate, ok := catalog.Gate(142, 1)
+	if !ok {
+		t.Fatal("teleport gate was not loaded")
+	}
+	if gate.Name != "Test Gate" || gate.From != (Point{2, 2}) || gate.To != (Point{7, 7}) || gate.ToMapID != 143 {
+		t.Fatalf("unexpected gate: %+v", gate)
+	}
+	if _, ok := catalog.Gate(142, 99); ok {
+		t.Fatal("undefined teleport gate was returned")
 	}
 }
 
@@ -96,5 +129,9 @@ func TestRepositorySystemDataCompatibility(t *testing.T) {
 	}
 	if data.Spec.MapID != 142 || data.Terrain.Width != 797 || data.Terrain.Height != 902 || len(data.Resurrection) == 0 {
 		t.Fatalf("unexpected legacy map 142: spec=%+v terrain=%dx%d spawns=%d", data.Spec, data.Terrain.Width, data.Terrain.Height, len(data.Resurrection))
+	}
+	gate, ok := catalog.Gate(142, 1)
+	if !ok || gate.From != (Point{584, 719}) || gate.To != (Point{829, 454}) {
+		t.Fatalf("unexpected legacy teleport gate: %+v, found=%t", gate, ok)
 	}
 }

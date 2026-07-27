@@ -105,6 +105,8 @@ func (s *session) handle(ctx context.Context, frame gameprotocol.Frame) error {
 			return s.handleMove(ctx, frame, true)
 		case 18:
 			return s.handleMove(ctx, frame, false)
+		case 22:
+			return s.handleTeleport(ctx, frame)
 		case 271:
 			return nil
 		}
@@ -431,6 +433,90 @@ func (s *session) handleMove(ctx context.Context, frame gameprotocol.Frame, run 
 		}
 		s.server.sendToObjects([]int32{left.ObjectID}, outSelf)
 	}
+	return nil
+}
+
+func (s *session) handleTeleport(ctx context.Context, frame gameprotocol.Frame) error {
+	if len(frame.Data) != 6 {
+		return errors.New("invalid teleport gate packet")
+	}
+	gate := int32(binary.LittleEndian.Uint32(frame.Data[2:6]))
+	transition, err := s.server.world.Teleport(ctx, s.objectID, gate)
+	if err != nil {
+		code := int32(775)
+		switch {
+		case errors.Is(err, gameworld.ErrGateTooFar):
+			code = 4609
+		case errors.Is(err, gameworld.ErrLevelTooLow):
+			code = 4624
+		case errors.Is(err, gameworld.ErrDestination), errors.Is(err, gameworld.ErrMapFull):
+			code = 769
+		case !errors.Is(err, gameworld.ErrGateNotFound):
+			return err
+		}
+		packet, packetErr := gameErrorPacket(code)
+		if packetErr != nil {
+			return packetErr
+		}
+		return s.writePackets(packet)
+	}
+	if err := s.server.store.SaveWorldState(ctx, s.account, s.characterID, gamestore.WorldState{MapID: transition.Player.MapID, PositionX: transition.Player.Position.X, PositionY: transition.Player.Position.Y, Direction: transition.Player.Direction, CurrentHP: transition.Player.CurrentHP, CurrentMP: transition.Player.CurrentMP}); err != nil {
+		return err
+	}
+	leave, err := leaveScenePacket()
+	if err != nil {
+		return err
+	}
+	outSelf, err := objectOutPacket(transition.Player.ObjectID)
+	if err != nil {
+		return err
+	}
+	s.server.sendToObjects(transition.OldObservers, outSelf)
+	if transition.MapChanged {
+		changed, err := changeMapPacket(transition.Player)
+		if err != nil {
+			return err
+		}
+		if err := s.writePackets(leave, changed); err != nil {
+			return err
+		}
+		s.stage = loadingScene
+		return nil
+	}
+	packets := [][]byte{leave}
+	for _, observerID := range transition.OldObservers {
+		out, err := objectOutPacket(observerID)
+		if err != nil {
+			return err
+		}
+		packets = append(packets, out)
+	}
+	stop, err := stopPacket(transition.Player)
+	if err != nil {
+		return err
+	}
+	enter, err := enterScenePacket(transition.Player)
+	if err != nil {
+		return err
+	}
+	packets = append(packets, stop, enter)
+	observerIDs := make([]int32, 0, len(transition.NewVisible))
+	for _, visible := range transition.NewVisible {
+		visiblePackets, err := visibleObjectPackets(visible)
+		if err != nil {
+			return err
+		}
+		packets = append(packets, visiblePackets...)
+		observerIDs = append(observerIDs, visible.ObjectID)
+	}
+	if err := s.writePackets(packets...); err != nil {
+		return err
+	}
+	selfPackets, err := visibleObjectPackets(transition.Player)
+	if err != nil {
+		return err
+	}
+	s.server.sendToObjects(observerIDs, selfPackets...)
 	return nil
 }
 

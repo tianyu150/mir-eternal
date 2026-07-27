@@ -48,6 +48,26 @@ func decryptPacket(packet []byte) []byte {
 	return decoded
 }
 
+func TestTeleportPacketsPreserveLegacyLayout(t *testing.T) {
+	player := gameworld.Player{MapID: 143, RouteID: 1, Position: gameworld.Point{X: 100, Y: 200}, Altitude: 12}
+	changed, err := changeMapPacket(player)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed = decryptPacket(changed)
+	if len(changed) != 23 || binary.LittleEndian.Uint16(changed) != 41 || binary.LittleEndian.Uint32(changed[6:10]) != 143 || binary.LittleEndian.Uint32(changed[10:14]) != 1 || readPoint(changed, 14, false) != player.Position || binary.LittleEndian.Uint16(changed[18:20]) != 12 {
+		t.Fatalf("bad change-map packet: %x", changed)
+	}
+	gameError, err := gameErrorPacket(4609)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gameError = decryptPacket(gameError)
+	if binary.LittleEndian.Uint16(gameError) != 9 || binary.LittleEndian.Uint32(gameError[2:6]) != 4609 {
+		t.Fatalf("bad game-error packet: %x", gameError)
+	}
+}
+
 func TestWorldPacketsPreserveLegacyCoordinates(t *testing.T) {
 	player := gameworld.Player{ObjectID: 7, CharacterID: 7, Name: "Hero", MapID: 142, RouteID: 1, Position: gameworld.Point{X: 855, Y: 459}, Altitude: 10, Direction: 2048, Race: 1, Gender: 1, Hair: 2, HairColor: 3, Face: 4, Level: 1, CurrentHP: 80, MaxHP: 100, CurrentMP: 50, MaxMP: 100}
 	syncPacket, err := syncCharacterPacket(player)

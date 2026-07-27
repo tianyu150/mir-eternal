@@ -14,6 +14,10 @@ var (
 	ErrPlayerNotActive  = errors.New("player is not active in scene")
 	ErrInvalidDirection = errors.New("invalid player direction")
 	ErrMapFull          = errors.New("map player limit reached")
+	ErrGateNotFound     = errors.New("teleport gate not found")
+	ErrGateTooFar       = errors.New("player is too far from teleport gate")
+	ErrLevelTooLow      = errors.New("player level is below map minimum")
+	ErrDestination      = errors.New("teleport destination is unavailable")
 )
 
 type Point struct {
@@ -75,6 +79,16 @@ type Movement struct {
 type Rotation struct {
 	Player    Player
 	Observers []int32
+}
+
+type Transition struct {
+	Player       Player
+	Gate         TeleportGate
+	FromMapID    int32
+	From         Point
+	MapChanged   bool
+	OldObservers []int32
+	NewVisible   []Player
 }
 
 func GridDistance(a, b Point) int32 {

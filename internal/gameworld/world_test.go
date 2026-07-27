@@ -66,6 +66,87 @@ func TestWorldPlayerLifecycleAndMovement(t *testing.T) {
 	}
 }
 
+func TestWorldTeleportAcrossMaps(t *testing.T) {
+	world, cancel := startTestWorld(t, 3)
+	defer cancel()
+	ctx := context.Background()
+	players := []Player{
+		{ObjectID: 1, CharacterID: 1, Account: "a", Name: "Traveler", MapID: 142, Position: Point{2, 2}, Level: 10},
+		{ObjectID: 2, CharacterID: 2, Account: "b", Name: "Old Observer", MapID: 142, Position: Point{4, 2}},
+		{ObjectID: 3, CharacterID: 3, Account: "c", Name: "New Observer", MapID: 143, Position: Point{7, 7}},
+	}
+	for _, player := range players {
+		if _, err := world.Join(ctx, player); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := world.Activate(ctx, player.ObjectID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	transition, err := world.Teleport(ctx, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !transition.MapChanged || transition.Player.MapID != 143 || transition.Player.Position != (Point{6, 6}) || transition.Player.Active {
+		t.Fatalf("unexpected transition: %+v", transition)
+	}
+	if len(transition.OldObservers) != 1 || transition.OldObservers[0] != 2 {
+		t.Fatalf("old observers: %v", transition.OldObservers)
+	}
+	activation, err := world.Activate(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(activation.Visible) != 1 || activation.Visible[0].ObjectID != 3 {
+		t.Fatalf("destination visibility: %+v", activation.Visible)
+	}
+}
+
+func TestWorldSameMapTeleportAndValidation(t *testing.T) {
+	world, cancel := startTestWorld(t, 2)
+	defer cancel()
+	ctx := context.Background()
+	for _, player := range []Player{
+		{ObjectID: 1, CharacterID: 1, Account: "a", Name: "Traveler", MapID: 142, Position: Point{3, 3}, Level: 10},
+		{ObjectID: 2, CharacterID: 2, Account: "b", Name: "Old Observer", MapID: 142, Position: Point{4, 3}},
+		{ObjectID: 3, CharacterID: 3, Account: "c", Name: "New Observer", MapID: 142, Position: Point{8, 7}},
+	} {
+		_, _ = world.Join(ctx, player)
+		_, _ = world.Activate(ctx, player.ObjectID)
+	}
+	transition, err := world.Teleport(ctx, 1, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transition.MapChanged || transition.Player.Position != (Point{8, 8}) || !transition.Player.Active {
+		t.Fatalf("unexpected local transition: %+v", transition)
+	}
+	if len(transition.OldObservers) != 1 || transition.OldObservers[0] != 2 || len(transition.NewVisible) != 1 || transition.NewVisible[0].ObjectID != 3 {
+		t.Fatalf("unexpected AOI transition: old=%v new=%+v", transition.OldObservers, transition.NewVisible)
+	}
+	if _, err := world.Teleport(ctx, 1, 99); !errors.Is(err, ErrGateNotFound) {
+		t.Fatalf("missing gate: %v", err)
+	}
+	if _, err := world.Teleport(ctx, 1, 3); !errors.Is(err, ErrGateTooFar) {
+		t.Fatalf("distant gate: %v", err)
+	}
+}
+
+func TestWorldTeleportEnforcesMinimumLevel(t *testing.T) {
+	world, cancel := startTestWorld(t, 2)
+	defer cancel()
+	ctx := context.Background()
+	_, _ = world.Join(ctx, Player{ObjectID: 1, CharacterID: 1, Account: "a", Name: "Low Level", MapID: 142, Position: Point{2, 2}, Level: 1})
+	_, _ = world.Activate(ctx, 1)
+	if _, err := world.Teleport(ctx, 1, 1); !errors.Is(err, ErrLevelTooLow) {
+		t.Fatalf("minimum level: %v", err)
+	}
+	player, err := world.Player(ctx, 1)
+	if err != nil || player.MapID != 142 || player.Position != (Point{2, 2}) {
+		t.Fatalf("failed teleport mutated player: %+v, %v", player, err)
+	}
+}
+
 func TestWorldRejectsBlockedMoveAndTracksAOI(t *testing.T) {
 	world, cancel := startTestWorld(t, 1)
 	defer cancel()

@@ -353,6 +353,95 @@ func (w *World) Rotate(ctx context.Context, objectID int32, direction uint16) (R
 	}
 }
 
+type transitionResponse struct {
+	result Transition
+	err    error
+}
+type teleportCommand struct {
+	objectID int32
+	gate     int32
+	response chan transitionResponse
+}
+
+func (c teleportCommand) apply(w *World, state *worldState) {
+	player := state.players[c.objectID]
+	if player == nil {
+		c.response <- transitionResponse{err: ErrPlayerNotFound}
+		return
+	}
+	if !player.Active {
+		c.response <- transitionResponse{err: ErrPlayerNotActive}
+		return
+	}
+	gate, ok := w.catalog.Gate(player.MapID, c.gate)
+	if !ok {
+		c.response <- transitionResponse{err: ErrGateNotFound}
+		return
+	}
+	if GridDistance(player.Position, gate.From) >= 8 {
+		c.response <- transitionResponse{err: ErrGateTooFar}
+		return
+	}
+	targetData, err := w.catalog.Load(gate.ToMapID)
+	if err != nil {
+		c.response <- transitionResponse{err: fmt.Errorf("load teleport destination: %w", err)}
+		return
+	}
+	if player.Level < targetData.Spec.MinLevel {
+		c.response <- transitionResponse{err: ErrLevelTooLow}
+		return
+	}
+	source := state.maps[player.MapID]
+	target := state.maps[gate.ToMapID]
+	if target == nil {
+		target = &mapInstance{data: targetData, players: make(map[int32]*Player), occupied: make(map[Point]int32)}
+	}
+	mapChanged := gate.ToMapID != player.MapID
+	if mapChanged && len(target.players) >= targetData.Spec.LimitPlayers {
+		c.response <- transitionResponse{err: ErrMapFull}
+		return
+	}
+	destination, ok := target.nearestAvailable(gate.To, player.ObjectID, 3)
+	if !ok {
+		c.response <- transitionResponse{err: ErrDestination}
+		return
+	}
+	fromMapID, from := player.MapID, player.Position
+	oldObservers := visibleIDs(source, *player, w.viewRange)
+	delete(source.occupied, player.Position)
+	if mapChanged {
+		delete(source.players, player.ObjectID)
+		state.maps[gate.ToMapID] = target
+		target.players[player.ObjectID] = player
+		player.MapID = gate.ToMapID
+		player.RouteID = 1
+		player.Position = destination
+		player.Altitude = targetData.Terrain.Altitude(destination)
+		player.Active = false
+		c.response <- transitionResponse{result: Transition{Player: *player, Gate: gate, FromMapID: fromMapID, From: from, MapChanged: true, OldObservers: oldObservers}}
+		return
+	}
+	player.Position = destination
+	player.Altitude = targetData.Terrain.Altitude(destination)
+	target.occupied[destination] = player.ObjectID
+	c.response <- transitionResponse{result: Transition{Player: *player, Gate: gate, FromMapID: fromMapID, From: from, OldObservers: oldObservers, NewVisible: visiblePlayers(target, *player, w.viewRange)}}
+}
+
+func (w *World) Teleport(ctx context.Context, objectID, gate int32) (Transition, error) {
+	response := make(chan transitionResponse, 1)
+	if err := w.submit(ctx, teleportCommand{objectID: objectID, gate: gate, response: response}); err != nil {
+		return Transition{}, err
+	}
+	select {
+	case result := <-response:
+		return result.result, result.err
+	case <-ctx.Done():
+		return Transition{}, ctx.Err()
+	case <-w.done:
+		return Transition{}, ErrNotRunning
+	}
+}
+
 type statsResponse struct{ maps, players, active int }
 type statsCommand struct{ response chan statsResponse }
 
@@ -387,6 +476,31 @@ func (instance *mapInstance) canOccupy(point Point, objectID int32) bool {
 	occupant, occupied := instance.occupied[point]
 	return !occupied || occupant == objectID
 }
+func (instance *mapInstance) nearestAvailable(center Point, objectID, radius int32) (Point, bool) {
+	if instance.canOccupy(center, objectID) {
+		return center, true
+	}
+	for distance := int32(1); distance <= radius; distance++ {
+		for x := center.X - distance; x <= center.X+distance; x++ {
+			for _, y := range []int32{center.Y - distance, center.Y + distance} {
+				candidate := Point{X: x, Y: y}
+				if instance.canOccupy(candidate, objectID) {
+					return candidate, true
+				}
+			}
+		}
+		for y := center.Y - distance + 1; y < center.Y+distance; y++ {
+			for _, x := range []int32{center.X - distance, center.X + distance} {
+				candidate := Point{X: x, Y: y}
+				if instance.canOccupy(candidate, objectID) {
+					return candidate, true
+				}
+			}
+		}
+	}
+	return Point{}, false
+}
+
 func (instance *mapInstance) spawn(seed int32) Point {
 	points := instance.data.Resurrection
 	if len(points) > 0 {

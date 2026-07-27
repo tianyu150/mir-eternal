@@ -1,6 +1,6 @@
 # Go 服务端架构与迁移状态
 
-本目录记录 `AccountServer` 和 `GameServer` 从 C# 向 Go 的渐进式迁移。旧 C# 项目暂时保留，作为协议和尚未迁移业务的权威参考；Go 服务不依赖 Windows Forms，可运行于 Linux、Windows 和容器环境。
+本目录记录 `AccountServer` 和 `GameServer` 从 C# 向 Go 的渐进式迁移。旧 C# 项目暂时保留，作为协议和尚未迁移业务的权威参考；Go 服务不依赖 Windows Forms，可运行于 Linux、Windows 和容器环境。每个后续完成的阶段都必须在 [`docs/migrations`](migrations/README.md) 留下独立任务记录。
 
 ## 目录结构
 
@@ -60,7 +60,8 @@ Client   -- TCP/8701 --> GameServer --> character database
 - 读取旧 `.terrain` 矩阵、地图定义、复活区域、通行标记和地形高度。
 - 单 Actor 世界状态、地图人数限制、占位碰撞和 Chebyshev AOI。
 - 权威走路、跑步、转向、位置纠正以及玩家出现/消失广播。
-- 角色离线时原子保存地图、坐标、方向、HP 和 MP。
+- 兼容旧 `TeleportGates` 的同地图/跨地图传送、距离/等级/容量校验和 AOI 重建。
+- 角色离线或传送成功时原子保存地图、坐标、方向、HP 和 MP。
 
 ### 协议
 
@@ -80,7 +81,7 @@ go generate ./internal/gameprotocol
 
 下面的 C# 世界逻辑尚未宣称完成：
 
-- 地图事件、传送门、副本和定时活动；
+- 地图事件、副本、多线路和定时活动；
 - 怪物、宠物、守卫、NPC、物品和陷阱对象；
 - 战斗、技能、Buff、掉落和完整玩家属性；
 - 背包、装备、商店和仓库；

@@ -21,8 +21,23 @@ type MapSpec struct {
 	MapName        string `json:"MapName"`
 	TerrainFile    string `json:"TerrainFile"`
 	LimitPlayers   int    `json:"LimitPlayers"`
+	MinLevel       byte   `json:"MinLevel"`
 	NoReconnect    bool   `json:"NoReconnect"`
 	NoReconnectMap int32  `json:"NoReconnectMapId"`
+}
+
+type TeleportGate struct {
+	Number    int32
+	Name      string
+	FromMapID int32
+	ToMapID   int32
+	From      Point
+	To        Point
+}
+
+type gateKey struct {
+	mapID  int32
+	number int32
 }
 
 type Terrain struct {
@@ -59,6 +74,7 @@ type Catalog struct {
 	root     string
 	maxCells int64
 	specs    map[int32]MapSpec
+	gates    map[gateKey]TeleportGate
 	mu       sync.Mutex
 	loaded   map[int32]*MapData
 }
@@ -75,7 +91,7 @@ func OpenCatalog(systemPath string, maxTerrainCells int64) (*Catalog, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read map definitions: %w", err)
 	}
-	catalog := &Catalog{root: systemPath, maxCells: maxTerrainCells, specs: make(map[int32]MapSpec), loaded: make(map[int32]*MapData)}
+	catalog := &Catalog{root: systemPath, maxCells: maxTerrainCells, specs: make(map[int32]MapSpec), gates: make(map[gateKey]TeleportGate), loaded: make(map[int32]*MapData)}
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".txt") {
 			continue
@@ -103,7 +119,67 @@ func OpenCatalog(systemPath string, maxTerrainCells int64) (*Catalog, error) {
 	if len(catalog.specs) == 0 {
 		return nil, errors.New("no map definitions found")
 	}
+	if err := catalog.loadTeleportGates(); err != nil {
+		return nil, err
+	}
 	return catalog, nil
+}
+
+func (c *Catalog) loadTeleportGates() error {
+	path := filepath.Join(c.root, "GameMap", "TeleportGates")
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return fmt.Errorf("read teleport gate definitions: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".txt") {
+			continue
+		}
+		payload, err := os.ReadFile(filepath.Join(path, entry.Name()))
+		if err != nil {
+			return fmt.Errorf("read teleport gate %q: %w", entry.Name(), err)
+		}
+		var definition struct {
+			Number     int32  `json:"TeleportGateNumber"`
+			Name       string `json:"TeleportGateName"`
+			FromMapID  int32  `json:"FromMapId"`
+			ToMapID    int32  `json:"ToMapId"`
+			FromCoords string `json:"FromCoords"`
+			ToCoords   string `json:"ToCoords"`
+		}
+		payload = bytes.TrimPrefix(payload, []byte{0xef, 0xbb, 0xbf})
+		if err := json.Unmarshal(payload, &definition); err != nil {
+			return fmt.Errorf("decode teleport gate %q: %w", entry.Name(), err)
+		}
+		if definition.Number <= 0 {
+			return fmt.Errorf("teleport gate %q has invalid number", entry.Name())
+		}
+		if _, ok := c.specs[definition.FromMapID]; !ok {
+			return fmt.Errorf("teleport gate %q references undefined source map %d", entry.Name(), definition.FromMapID)
+		}
+		if _, ok := c.specs[definition.ToMapID]; !ok {
+			return fmt.Errorf("teleport gate %q references undefined destination map %d", entry.Name(), definition.ToMapID)
+		}
+		from, err := parsePoint(definition.FromCoords)
+		if err != nil {
+			return fmt.Errorf("teleport gate %q source coordinates: %w", entry.Name(), err)
+		}
+		to, err := parsePoint(definition.ToCoords)
+		if err != nil {
+			return fmt.Errorf("teleport gate %q destination coordinates: %w", entry.Name(), err)
+		}
+		key := gateKey{mapID: definition.FromMapID, number: definition.Number}
+		if _, exists := c.gates[key]; exists {
+			return fmt.Errorf("duplicate teleport gate %d on map %d", definition.Number, definition.FromMapID)
+		}
+		c.gates[key] = TeleportGate{Number: definition.Number, Name: definition.Name, FromMapID: definition.FromMapID, ToMapID: definition.ToMapID, From: from, To: to}
+	}
+	return nil
+}
+
+func (c *Catalog) Gate(mapID, number int32) (TeleportGate, bool) {
+	gate, ok := c.gates[gateKey{mapID: mapID, number: number}]
+	return gate, ok
 }
 
 func (c *Catalog) Load(mapID int32) (*MapData, error) {

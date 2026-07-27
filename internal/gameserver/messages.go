@@ -129,6 +129,23 @@ func syncCharacterPacket(player gameworld.Player) ([]byte, error) {
 
 func endSyncPacket(characterID int32) ([]byte, error) { return integerPacket(33, characterID) }
 
+func gameErrorPacket(code int32) ([]byte, error) {
+	return gameprotocol.Build(9, func(data []byte) {
+		binary.LittleEndian.PutUint32(data[2:6], uint32(code))
+	})
+}
+
+func leaveScenePacket() ([]byte, error) { return gameprotocol.Build(40, nil) }
+
+func changeMapPacket(player gameworld.Player) ([]byte, error) {
+	return gameprotocol.Build(41, func(data []byte) {
+		binary.LittleEndian.PutUint32(data[6:10], uint32(player.MapID))
+		binary.LittleEndian.PutUint32(data[10:14], uint32(player.RouteID))
+		writePoint(data, 14, player.Position)
+		binary.LittleEndian.PutUint16(data[18:20], player.Altitude)
+	})
+}
+
 func enterScenePacket(player gameworld.Player) ([]byte, error) {
 	return gameprotocol.Build(39, func(data []byte) {
 		binary.LittleEndian.PutUint32(data[2:6], uint32(player.MapID))

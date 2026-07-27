@@ -12,7 +12,7 @@ import (
 func makeTestCatalog(t *testing.T) *Catalog {
 	t.Helper()
 	root := t.TempDir()
-	for _, directory := range []string{"GameMap/Maps", "GameMap/Terrains", "GameMap/MapAreas", "GameMap/TeleportGates"} {
+	for _, directory := range []string{"GameMap/Maps", "GameMap/Terrains", "GameMap/MapAreas", "GameMap/TeleportGates", "GameMap/Guards", "Npc/Guards"} {
 		if err := os.MkdirAll(filepath.Join(root, directory), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -33,6 +33,16 @@ func makeTestCatalog(t *testing.T) *Catalog {
 	}
 	distantGateJSON := `{"TeleportGateNumber":3,"FromMapId":142,"ToMapId":142,"TeleportGateName":"Distant Gate","FromCoords":"0, 0","ToCoords":"1, 1"}`
 	if err := os.WriteFile(filepath.Join(root, "GameMap/TeleportGates/142-3-Test.txt"), []byte(distantGateJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	guardTemplateJSON := `{"Name":"Test Guard","GuardNumber":7000,"Level":20,"Nothingness":false}`
+	if err := os.WriteFile(filepath.Join(root, "Npc/Guards/7000-Test.txt"), []byte(guardTemplateJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The trailing comma is intentional: four legacy placement files in the
+	// repository use this Newtonsoft-compatible form.
+	guardPlacementJSON := `{"GuardNumber":7000,"FromMapId":142,"FromCoords":"6, 2","Direction":"右下",}`
+	if err := os.WriteFile(filepath.Join(root, "GameMap/Guards/142-Test.txt"), []byte(guardPlacementJSON), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	catalog, err := OpenCatalog(root, 1000)
@@ -89,6 +99,21 @@ func TestCatalogLoadsLegacyTerrain(t *testing.T) {
 	}
 }
 
+func TestCatalogLoadsLegacyGuard(t *testing.T) {
+	catalog := makeTestCatalog(t)
+	data, err := catalog.Load(142)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Guards) != 1 {
+		t.Fatalf("guards=%+v", data.Guards)
+	}
+	guard := data.Guards[0]
+	if guard.ObjectID != staticGuardObjectBase+1 || guard.Template != 7000 || guard.Name != "Test Guard" || guard.Level != 20 || guard.Position != (Point{6, 2}) || guard.Direction != 5120 || guard.MaxHP != 9999 || !guard.Blocking || guard.Altitude != 10 {
+		t.Fatalf("unexpected guard: %+v", guard)
+	}
+}
+
 func TestCatalogLoadsTeleportGate(t *testing.T) {
 	catalog := makeTestCatalog(t)
 	gate, ok := catalog.Gate(142, 1)
@@ -127,8 +152,18 @@ func TestRepositorySystemDataCompatibility(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if data.Spec.MapID != 142 || data.Terrain.Width != 797 || data.Terrain.Height != 902 || len(data.Resurrection) == 0 {
-		t.Fatalf("unexpected legacy map 142: spec=%+v terrain=%dx%d spawns=%d", data.Spec, data.Terrain.Width, data.Terrain.Height, len(data.Resurrection))
+	if data.Spec.MapID != 142 || data.Terrain.Width != 797 || data.Terrain.Height != 902 || len(data.Resurrection) == 0 || len(data.Guards) != 25 {
+		t.Fatalf("unexpected legacy map 142: spec=%+v terrain=%dx%d spawns=%d guards=%d", data.Spec, data.Terrain.Width, data.Terrain.Height, len(data.Resurrection), len(data.Guards))
+	}
+	foundGuard := false
+	for _, guard := range data.Guards {
+		if guard.Template == 6734 && guard.Position == (Point{935, 375}) && guard.Direction == 7168 {
+			foundGuard = true
+			break
+		}
+	}
+	if !foundGuard {
+		t.Fatal("legacy greatsword guard was not loaded")
 	}
 	gate, ok := catalog.Gate(142, 1)
 	if !ok || gate.From != (Point{584, 719}) || gate.To != (Point{829, 454}) {

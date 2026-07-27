@@ -19,6 +19,16 @@ type worldState struct {
 	players map[int32]*Player
 }
 
+func newMapInstance(data *MapData) *mapInstance {
+	instance := &mapInstance{data: data, players: make(map[int32]*Player), occupied: make(map[Point]int32)}
+	for _, guard := range data.Guards {
+		if guard.Blocking {
+			instance.occupied[guard.Position] = guard.ObjectID
+		}
+	}
+	return instance
+}
+
 type command interface{ apply(*World, *worldState) }
 
 type World struct {
@@ -113,7 +123,7 @@ func (c joinCommand) apply(w *World, state *worldState) {
 	}
 	instance := state.maps[c.player.MapID]
 	if instance == nil {
-		instance = &mapInstance{data: data, players: make(map[int32]*Player), occupied: make(map[Point]int32)}
+		instance = newMapInstance(data)
 		state.maps[c.player.MapID] = instance
 	}
 	if len(instance.players) >= data.Spec.LimitPlayers {
@@ -166,7 +176,8 @@ func (c activateCommand) apply(w *World, state *worldState) {
 		return
 	}
 	if player.Active {
-		c.response <- activationResponse{result: Activation{Player: *player, Visible: visiblePlayers(state.maps[player.MapID], *player, w.viewRange)}}
+		instance := state.maps[player.MapID]
+		c.response <- activationResponse{result: Activation{Player: *player, Visible: visiblePlayers(instance, *player, w.viewRange), Guards: visibleGuards(instance, player.Position, w.viewRange)}}
 		return
 	}
 	instance := state.maps[player.MapID]
@@ -176,7 +187,7 @@ func (c activateCommand) apply(w *World, state *worldState) {
 	player.Altitude = instance.data.Terrain.Altitude(player.Position)
 	player.Active = true
 	instance.occupied[player.Position] = player.ObjectID
-	c.response <- activationResponse{result: Activation{Player: *player, Visible: visiblePlayers(instance, *player, w.viewRange)}}
+	c.response <- activationResponse{result: Activation{Player: *player, Visible: visiblePlayers(instance, *player, w.viewRange), Guards: visibleGuards(instance, player.Position, w.viewRange)}}
 }
 func (w *World) Activate(ctx context.Context, objectID int32) (Activation, error) {
 	response := make(chan activationResponse, 1)
@@ -260,6 +271,7 @@ func (c moveCommand) apply(w *World, state *worldState) {
 		return
 	}
 	before := visibleMap(instance, *player, w.viewRange)
+	beforeGuards := visibleGuardMap(instance, from, w.viewRange)
 	direction := Direction(from, c.target)
 	player.Direction = direction
 	first := Step(from, direction, 1)
@@ -281,6 +293,7 @@ func (c moveCommand) apply(w *World, state *worldState) {
 	player.Altitude = instance.data.Terrain.Altitude(destination)
 	instance.occupied[destination] = player.ObjectID
 	after := visibleMap(instance, *player, w.viewRange)
+	afterGuards := visibleGuardMap(instance, destination, w.viewRange)
 	result := Movement{Player: *player, From: from, To: destination, Kind: kind}
 	for id, other := range after {
 		if _, wasVisible := before[id]; wasVisible {
@@ -292,6 +305,16 @@ func (c moveCommand) apply(w *World, state *worldState) {
 	for id, other := range before {
 		if _, stillVisible := after[id]; !stillVisible {
 			result.Left = append(result.Left, *other)
+		}
+	}
+	for id, guard := range afterGuards {
+		if _, wasVisible := beforeGuards[id]; !wasVisible {
+			result.EnteredGuards = append(result.EnteredGuards, guard)
+		}
+	}
+	for id, guard := range beforeGuards {
+		if _, stillVisible := afterGuards[id]; !stillVisible {
+			result.LeftGuards = append(result.LeftGuards, guard)
 		}
 	}
 	c.response <- moveResponse{result: result}
@@ -394,7 +417,7 @@ func (c teleportCommand) apply(w *World, state *worldState) {
 	source := state.maps[player.MapID]
 	target := state.maps[gate.ToMapID]
 	if target == nil {
-		target = &mapInstance{data: targetData, players: make(map[int32]*Player), occupied: make(map[Point]int32)}
+		target = newMapInstance(targetData)
 	}
 	mapChanged := gate.ToMapID != player.MapID
 	if mapChanged && len(target.players) >= targetData.Spec.LimitPlayers {
@@ -408,6 +431,7 @@ func (c teleportCommand) apply(w *World, state *worldState) {
 	}
 	fromMapID, from := player.MapID, player.Position
 	oldObservers := visibleIDs(source, *player, w.viewRange)
+	oldGuards := visibleGuards(source, player.Position, w.viewRange)
 	delete(source.occupied, player.Position)
 	if mapChanged {
 		delete(source.players, player.ObjectID)
@@ -418,13 +442,13 @@ func (c teleportCommand) apply(w *World, state *worldState) {
 		player.Position = destination
 		player.Altitude = targetData.Terrain.Altitude(destination)
 		player.Active = false
-		c.response <- transitionResponse{result: Transition{Player: *player, Gate: gate, FromMapID: fromMapID, From: from, MapChanged: true, OldObservers: oldObservers}}
+		c.response <- transitionResponse{result: Transition{Player: *player, Gate: gate, FromMapID: fromMapID, From: from, MapChanged: true, OldObservers: oldObservers, OldGuards: oldGuards}}
 		return
 	}
 	player.Position = destination
 	player.Altitude = targetData.Terrain.Altitude(destination)
 	target.occupied[destination] = player.ObjectID
-	c.response <- transitionResponse{result: Transition{Player: *player, Gate: gate, FromMapID: fromMapID, From: from, OldObservers: oldObservers, NewVisible: visiblePlayers(target, *player, w.viewRange)}}
+	c.response <- transitionResponse{result: Transition{Player: *player, Gate: gate, FromMapID: fromMapID, From: from, OldObservers: oldObservers, OldGuards: oldGuards, NewVisible: visiblePlayers(target, *player, w.viewRange), NewGuards: visibleGuards(target, player.Position, w.viewRange)}}
 }
 
 func (w *World) Teleport(ctx context.Context, objectID, gate int32) (Transition, error) {
@@ -442,7 +466,7 @@ func (w *World) Teleport(ctx context.Context, objectID, gate int32) (Transition,
 	}
 }
 
-type statsResponse struct{ maps, players, active int }
+type statsResponse struct{ maps, players, active, guards int }
 type statsCommand struct{ response chan statsResponse }
 
 func (c statsCommand) apply(_ *World, state *worldState) {
@@ -452,20 +476,23 @@ func (c statsCommand) apply(_ *World, state *worldState) {
 			result.active++
 		}
 	}
+	for _, instance := range state.maps {
+		result.guards += len(instance.data.Guards)
+	}
 	c.response <- result
 }
-func (w *World) Stats(ctx context.Context) (maps, players, active int) {
+func (w *World) Stats(ctx context.Context) (maps, players, active, guards int) {
 	response := make(chan statsResponse, 1)
 	if err := w.submit(ctx, statsCommand{response}); err != nil {
-		return 0, 0, 0
+		return 0, 0, 0, 0
 	}
 	select {
 	case result := <-response:
-		return result.maps, result.players, result.active
+		return result.maps, result.players, result.active, result.guards
 	case <-ctx.Done():
-		return 0, 0, 0
+		return 0, 0, 0, 0
 	case <-w.done:
-		return 0, 0, 0
+		return 0, 0, 0, 0
 	}
 }
 
@@ -551,6 +578,25 @@ func visibleIDs(instance *mapInstance, player Player, distance int32) []int32 {
 	return result
 }
 
+func visibleGuardMap(instance *mapInstance, position Point, distance int32) map[int32]Guard {
+	result := make(map[int32]Guard)
+	for _, guard := range instance.data.Guards {
+		if GridDistance(position, guard.Position) <= distance {
+			result[guard.ObjectID] = guard
+		}
+	}
+	return result
+}
+
+func visibleGuards(instance *mapInstance, position Point, distance int32) []Guard {
+	visible := visibleGuardMap(instance, position, distance)
+	result := make([]Guard, 0, len(visible))
+	for _, guard := range visible {
+		result = append(result, guard)
+	}
+	return result
+}
+
 func (p Player) Validate() error {
 	if p.ObjectID <= 0 || p.CharacterID <= 0 || p.MapID <= 0 || p.Name == "" {
 		return fmt.Errorf("invalid world player")
@@ -587,5 +633,44 @@ func (w *World) Player(ctx context.Context, objectID int32) (Player, error) {
 		return Player{}, ctx.Err()
 	case <-w.done:
 		return Player{}, ErrNotRunning
+	}
+}
+
+type guardResponse struct {
+	guard Guard
+	err   error
+}
+type guardCommand struct {
+	playerID int32
+	guardID  int32
+	response chan guardResponse
+}
+
+func (c guardCommand) apply(w *World, state *worldState) {
+	player := state.players[c.playerID]
+	if player == nil || !player.Active {
+		c.response <- guardResponse{err: ErrPlayerNotActive}
+		return
+	}
+	guard, ok := w.catalog.Guard(c.guardID)
+	if !ok || guard.MapID != player.MapID || GridDistance(player.Position, guard.Position) > w.viewRange {
+		c.response <- guardResponse{err: ErrPlayerNotFound}
+		return
+	}
+	c.response <- guardResponse{guard: guard}
+}
+
+func (w *World) GuardForPlayer(ctx context.Context, playerID, guardID int32) (Guard, error) {
+	response := make(chan guardResponse, 1)
+	if err := w.submit(ctx, guardCommand{playerID: playerID, guardID: guardID, response: response}); err != nil {
+		return Guard{}, err
+	}
+	select {
+	case result := <-response:
+		return result.guard, result.err
+	case <-ctx.Done():
+		return Guard{}, ctx.Err()
+	case <-w.done:
+		return Guard{}, ErrNotRunning
 	}
 }

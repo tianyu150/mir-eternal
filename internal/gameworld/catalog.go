@@ -9,12 +9,18 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 )
 
-const passableMask uint32 = 0x10000000
+const (
+	passableMask          uint32 = 0x10000000
+	staticGuardObjectBase int32  = 1_500_000_000
+)
+
+var trailingCommaRE = regexp.MustCompile(`,\s*([}\]])`)
 
 type MapSpec struct {
 	MapID          int32  `json:"MapId"`
@@ -33,6 +39,19 @@ type TeleportGate struct {
 	ToMapID   int32
 	From      Point
 	To        Point
+}
+
+type Guard struct {
+	ObjectID  int32
+	Template  uint16
+	Name      string
+	Level     byte
+	MapID     int32
+	Position  Point
+	Altitude  uint16
+	Direction uint16
+	MaxHP     int32
+	Blocking  bool
 }
 
 type gateKey struct {
@@ -68,15 +87,18 @@ type MapData struct {
 	Spec         MapSpec
 	Terrain      *Terrain
 	Resurrection []Point
+	Guards       []Guard
 }
 
 type Catalog struct {
-	root     string
-	maxCells int64
-	specs    map[int32]MapSpec
-	gates    map[gateKey]TeleportGate
-	mu       sync.Mutex
-	loaded   map[int32]*MapData
+	root        string
+	maxCells    int64
+	specs       map[int32]MapSpec
+	gates       map[gateKey]TeleportGate
+	guardsByMap map[int32][]Guard
+	guardsByID  map[int32]Guard
+	mu          sync.Mutex
+	loaded      map[int32]*MapData
 }
 
 func OpenCatalog(systemPath string, maxTerrainCells int64) (*Catalog, error) {
@@ -91,7 +113,7 @@ func OpenCatalog(systemPath string, maxTerrainCells int64) (*Catalog, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read map definitions: %w", err)
 	}
-	catalog := &Catalog{root: systemPath, maxCells: maxTerrainCells, specs: make(map[int32]MapSpec), gates: make(map[gateKey]TeleportGate), loaded: make(map[int32]*MapData)}
+	catalog := &Catalog{root: systemPath, maxCells: maxTerrainCells, specs: make(map[int32]MapSpec), gates: make(map[gateKey]TeleportGate), guardsByMap: make(map[int32][]Guard), guardsByID: make(map[int32]Guard), loaded: make(map[int32]*MapData)}
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".txt") {
 			continue
@@ -120,6 +142,9 @@ func OpenCatalog(systemPath string, maxTerrainCells int64) (*Catalog, error) {
 		return nil, errors.New("no map definitions found")
 	}
 	if err := catalog.loadTeleportGates(); err != nil {
+		return nil, err
+	}
+	if err := catalog.loadGuards(); err != nil {
 		return nil, err
 	}
 	return catalog, nil
@@ -182,6 +207,109 @@ func (c *Catalog) Gate(mapID, number int32) (TeleportGate, bool) {
 	return gate, ok
 }
 
+func (c *Catalog) loadGuards() error {
+	templatesPath := filepath.Join(c.root, "Npc", "Guards")
+	templateEntries, err := os.ReadDir(templatesPath)
+	if err != nil {
+		return fmt.Errorf("read guard templates: %w", err)
+	}
+	type guardTemplate struct {
+		Name        string `json:"Name"`
+		Number      uint16 `json:"GuardNumber"`
+		Level       byte   `json:"Level"`
+		Nothingness bool   `json:"Nothingness"`
+	}
+	templates := make(map[uint16]guardTemplate)
+	for _, entry := range templateEntries {
+		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".txt") {
+			continue
+		}
+		payload, err := os.ReadFile(filepath.Join(templatesPath, entry.Name()))
+		if err != nil {
+			return fmt.Errorf("read guard template %q: %w", entry.Name(), err)
+		}
+		var template guardTemplate
+		if err := decodeLegacyJSON(payload, &template); err != nil {
+			return fmt.Errorf("decode guard template %q: %w", entry.Name(), err)
+		}
+		if template.Number == 0 {
+			return fmt.Errorf("guard template %q has invalid number", entry.Name())
+		}
+		if _, exists := templates[template.Number]; exists {
+			return fmt.Errorf("duplicate guard template %d", template.Number)
+		}
+		templates[template.Number] = template
+	}
+
+	placementsPath := filepath.Join(c.root, "GameMap", "Guards")
+	placementEntries, err := os.ReadDir(placementsPath)
+	if err != nil {
+		return fmt.Errorf("read guard placements: %w", err)
+	}
+	ordinal := int32(0)
+	for _, entry := range placementEntries {
+		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".txt") {
+			continue
+		}
+		payload, err := os.ReadFile(filepath.Join(placementsPath, entry.Name()))
+		if err != nil {
+			return fmt.Errorf("read guard placement %q: %w", entry.Name(), err)
+		}
+		var placement struct {
+			Template  uint16 `json:"GuardNumber"`
+			MapID     int32  `json:"FromMapId"`
+			Coords    string `json:"FromCoords"`
+			Direction string `json:"Direction"`
+		}
+		if err := decodeLegacyJSON(payload, &placement); err != nil {
+			return fmt.Errorf("decode guard placement %q: %w", entry.Name(), err)
+		}
+		template, ok := templates[placement.Template]
+		if !ok {
+			return fmt.Errorf("guard placement %q references undefined template %d", entry.Name(), placement.Template)
+		}
+		if _, ok := c.specs[placement.MapID]; !ok {
+			return fmt.Errorf("guard placement %q references undefined map %d", entry.Name(), placement.MapID)
+		}
+		position, err := parsePoint(placement.Coords)
+		if err != nil {
+			return fmt.Errorf("guard placement %q coordinates: %w", entry.Name(), err)
+		}
+		direction, err := parseDirection(placement.Direction)
+		if err != nil {
+			return fmt.Errorf("guard placement %q direction: %w", entry.Name(), err)
+		}
+		ordinal++
+		guard := Guard{ObjectID: staticGuardObjectBase + ordinal, Template: placement.Template, Name: template.Name, Level: template.Level, MapID: placement.MapID, Position: position, Direction: direction, MaxHP: 9999, Blocking: !template.Nothingness}
+		c.guardsByMap[placement.MapID] = append(c.guardsByMap[placement.MapID], guard)
+		c.guardsByID[guard.ObjectID] = guard
+	}
+	return nil
+}
+
+func decodeLegacyJSON(payload []byte, target any) error {
+	payload = bytes.TrimPrefix(payload, []byte{0xef, 0xbb, 0xbf})
+	payload = trailingCommaRE.ReplaceAll(payload, []byte("$1"))
+	return json.Unmarshal(payload, target)
+}
+
+func parseDirection(value string) (uint16, error) {
+	if value == "" {
+		return 0, nil
+	}
+	directions := map[string]uint16{"左方": 0, "左上": 1024, "上方": 2048, "右上": 3072, "右方": 4096, "右下": 5120, "下方": 6144, "左下": 7168}
+	direction, ok := directions[value]
+	if !ok {
+		return 0, fmt.Errorf("unknown direction %q", value)
+	}
+	return direction, nil
+}
+
+func (c *Catalog) Guard(objectID int32) (Guard, bool) {
+	guard, ok := c.guardsByID[objectID]
+	return guard, ok
+}
+
 func (c *Catalog) Load(mapID int32) (*MapData, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -200,7 +328,15 @@ func (c *Catalog) Load(mapID int32) (*MapData, error) {
 	if err != nil {
 		return nil, err
 	}
-	result := &MapData{Spec: spec, Terrain: terrain, Resurrection: areas}
+	guards := append([]Guard(nil), c.guardsByMap[mapID]...)
+	for index := range guards {
+		if !terrain.InBounds(guards[index].Position) {
+			return nil, fmt.Errorf("guard %d is outside map %d terrain", guards[index].Template, mapID)
+		}
+		guards[index].Altitude = terrain.Altitude(guards[index].Position)
+		c.guardsByID[guards[index].ObjectID] = guards[index]
+	}
+	result := &MapData{Spec: spec, Terrain: terrain, Resurrection: areas, Guards: guards}
 	c.loaded[mapID] = result
 	return result, nil
 }

@@ -105,6 +105,8 @@ func (s *session) handle(ctx context.Context, frame gameprotocol.Frame) error {
 			return s.handleMove(ctx, frame, true)
 		case 18:
 			return s.handleMove(ctx, frame, false)
+		case 19:
+			return s.handleObjectData(ctx, frame)
 		case 22:
 			return s.handleTeleport(ctx, frame)
 		case 271:
@@ -336,6 +338,13 @@ func (s *session) handleEnterScene(ctx context.Context) error {
 		packets = append(packets, visiblePackets...)
 		observerIDs = append(observerIDs, visible.ObjectID)
 	}
+	for _, guard := range activation.Guards {
+		guardPackets, err := guardVisiblePackets(guard)
+		if err != nil {
+			return err
+		}
+		packets = append(packets, guardPackets...)
+	}
 	if err := s.writePackets(packets...); err != nil {
 		return err
 	}
@@ -433,7 +442,45 @@ func (s *session) handleMove(ctx context.Context, frame gameprotocol.Frame, run 
 		}
 		s.server.sendToObjects([]int32{left.ObjectID}, outSelf)
 	}
+	for _, guard := range movement.EnteredGuards {
+		packets, err := guardVisiblePackets(guard)
+		if err != nil {
+			return err
+		}
+		if err := s.writePackets(packets...); err != nil {
+			return err
+		}
+	}
+	for _, guard := range movement.LeftGuards {
+		out, err := objectOutPacket(guard.ObjectID)
+		if err != nil {
+			return err
+		}
+		if err := s.writePackets(out); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func (s *session) handleObjectData(ctx context.Context, frame gameprotocol.Frame) error {
+	if len(frame.Data) != 10 {
+		return errors.New("invalid object data request")
+	}
+	objectID := int32(binary.LittleEndian.Uint32(frame.Data[2:6]))
+	guard, err := s.server.world.GuardForPlayer(ctx, s.objectID, objectID)
+	if err != nil {
+		packet, packetErr := socialErrorPacket(6732)
+		if packetErr != nil {
+			return packetErr
+		}
+		return s.writePackets(packet)
+	}
+	packet, err := syncGuardPacket(guard)
+	if err != nil {
+		return err
+	}
+	return s.writePackets(packet)
 }
 
 func (s *session) handleTeleport(ctx context.Context, frame gameprotocol.Frame) error {
@@ -491,6 +538,13 @@ func (s *session) handleTeleport(ctx context.Context, frame gameprotocol.Frame) 
 		}
 		packets = append(packets, out)
 	}
+	for _, guard := range transition.OldGuards {
+		out, err := objectOutPacket(guard.ObjectID)
+		if err != nil {
+			return err
+		}
+		packets = append(packets, out)
+	}
 	stop, err := stopPacket(transition.Player)
 	if err != nil {
 		return err
@@ -508,6 +562,13 @@ func (s *session) handleTeleport(ctx context.Context, frame gameprotocol.Frame) 
 		}
 		packets = append(packets, visiblePackets...)
 		observerIDs = append(observerIDs, visible.ObjectID)
+	}
+	for _, guard := range transition.NewGuards {
+		guardPackets, err := guardVisiblePackets(guard)
+		if err != nil {
+			return err
+		}
+		packets = append(packets, guardPackets...)
 	}
 	if err := s.writePackets(packets...); err != nil {
 		return err

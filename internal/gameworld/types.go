@@ -51,6 +51,7 @@ type Player struct {
 type Activation struct {
 	Player  Player
 	Visible []Player
+	Guards  []Guard
 }
 
 type Departure struct {
@@ -67,13 +68,15 @@ const (
 )
 
 type Movement struct {
-	Player    Player
-	From      Point
-	To        Point
-	Kind      MoveKind
-	Observers []int32  // Saw the player both before and after the movement.
-	Entered   []Player // Became visible to the moving player.
-	Left      []Player // Left the moving player's view.
+	Player        Player
+	From          Point
+	To            Point
+	Kind          MoveKind
+	Observers     []int32  // Saw the player both before and after the movement.
+	Entered       []Player // Became visible to the moving player.
+	Left          []Player // Left the moving player's view.
+	EnteredGuards []Guard
+	LeftGuards    []Guard
 }
 
 type Rotation struct {
@@ -88,7 +91,9 @@ type Transition struct {
 	From         Point
 	MapChanged   bool
 	OldObservers []int32
+	OldGuards    []Guard
 	NewVisible   []Player
+	NewGuards    []Guard
 }
 
 func GridDistance(a, b Point) int32 {

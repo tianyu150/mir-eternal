@@ -7,3 +7,4 @@
 | 001 | AccountServer、票据与 GameServer 登录核心 | 已完成，见 `docs/go-architecture.md` |
 | 002 | 地形、世界 Actor、AOI 与玩家移动 | 已完成，见 `docs/go-architecture.md` |
 | 003 | 传送门与地图切换 | 已完成，见 [003-teleport-gates.md](003-teleport-gates.md) |
+| 004 | 静态守卫/NPC 与 AOI | 已完成，见 [004-static-guards.md](004-static-guards.md) |

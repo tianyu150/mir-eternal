@@ -227,6 +227,54 @@ func objectOutPacket(objectID int32) ([]byte, error) {
 	return gameprotocol.Build(62, func(data []byte) { binary.LittleEndian.PutUint32(data[2:6], uint32(objectID)) })
 }
 
+func guardVisiblePackets(guard gameworld.Guard) ([][]byte, error) {
+	stop, err := gameprotocol.Build(48, func(data []byte) {
+		binary.LittleEndian.PutUint32(data[2:6], uint32(guard.ObjectID))
+		data[6] = 1
+		writePoint(data, 7, guard.Position)
+		binary.LittleEndian.PutUint16(data[11:13], guard.Altitude)
+	})
+	if err != nil {
+		return nil, err
+	}
+	visible, err := gameprotocol.Build(60, func(data []byte) {
+		data[2] = 1
+		binary.LittleEndian.PutUint32(data[3:7], uint32(guard.ObjectID))
+		data[7] = 1
+		writePoint(data, 8, guard.Position)
+		binary.LittleEndian.PutUint16(data[12:14], guard.Altitude)
+		binary.LittleEndian.PutUint16(data[14:16], guard.Direction)
+		data[16] = 100
+		data[18] = 192
+	})
+	if err != nil {
+		return nil, err
+	}
+	hp, err := gameprotocol.Build(78, func(data []byte) {
+		binary.LittleEndian.PutUint32(data[2:6], uint32(guard.ObjectID))
+		binary.LittleEndian.PutUint32(data[6:10], uint32(guard.MaxHP))
+		binary.LittleEndian.PutUint32(data[10:14], uint32(guard.MaxHP))
+	})
+	if err != nil {
+		return nil, err
+	}
+	return [][]byte{stop, visible, hp}, nil
+}
+
+func syncGuardPacket(guard gameworld.Guard) ([]byte, error) {
+	return gameprotocol.Build(65, func(data []byte) {
+		binary.LittleEndian.PutUint32(data[2:6], uint32(guard.ObjectID))
+		binary.LittleEndian.PutUint16(data[6:8], guard.Template)
+		data[10] = 3
+		data[11] = guard.Level
+		binary.LittleEndian.PutUint32(data[12:16], uint32(guard.MaxHP))
+	})
+}
+
+func socialErrorPacket(code int32) ([]byte, error) {
+	return gameprotocol.Build(514, func(data []byte) { binary.LittleEndian.PutUint32(data[2:6], uint32(code)) })
+}
+
 func visibleObjectPackets(player gameworld.Player) ([][]byte, error) {
 	appearance, err := appearancePacket(player)
 	if err != nil {

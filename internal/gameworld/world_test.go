@@ -66,6 +66,66 @@ func TestWorldPlayerLifecycleAndMovement(t *testing.T) {
 	}
 }
 
+func TestWorldLoadsGuardsIntoAOIAndCollision(t *testing.T) {
+	world, cancel := startTestWorld(t, 3)
+	defer cancel()
+	ctx := context.Background()
+	_, err := world.Join(ctx, Player{ObjectID: 1, CharacterID: 1, Account: "a", Name: "Observer", MapID: 142, Position: Point{5, 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	activation, err := world.Activate(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(activation.Guards) != 1 || activation.Guards[0].Template != 7000 {
+		t.Fatalf("visible guards=%+v", activation.Guards)
+	}
+	guard, err := world.GuardForPlayer(ctx, 1, activation.Guards[0].ObjectID)
+	if err != nil || guard.Name != "Test Guard" {
+		t.Fatalf("guard query=%+v, %v", guard, err)
+	}
+	maps, players, active, guards := world.Stats(ctx)
+	if maps != 1 || players != 1 || active != 1 || guards != 1 {
+		t.Fatalf("world stats=%d/%d/%d/%d", maps, players, active, guards)
+	}
+	movement, err := world.Move(ctx, 1, Point{9, 2}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if movement.Kind != MoveStopped || movement.Player.Position != (Point{5, 2}) {
+		t.Fatalf("guard did not block movement: %+v", movement)
+	}
+}
+
+func TestWorldGuardAOITransitions(t *testing.T) {
+	world, cancel := startTestWorld(t, 3)
+	defer cancel()
+	ctx := context.Background()
+	_, _ = world.Join(ctx, Player{ObjectID: 1, CharacterID: 1, Account: "a", Name: "Observer", MapID: 142, Position: Point{2, 2}})
+	activation, _ := world.Activate(ctx, 1)
+	if len(activation.Guards) != 0 {
+		t.Fatalf("initial guards=%+v", activation.Guards)
+	}
+	entered, err := world.Move(ctx, 1, Point{9, 2}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entered.EnteredGuards) != 1 || entered.EnteredGuards[0].Template != 7000 {
+		t.Fatalf("entered guards=%+v", entered.EnteredGuards)
+	}
+	left, err := world.Move(ctx, 1, Point{0, 2}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left.LeftGuards) != 1 || left.LeftGuards[0].Template != 7000 {
+		t.Fatalf("left guards=%+v", left.LeftGuards)
+	}
+	if _, err := world.GuardForPlayer(ctx, 1, entered.EnteredGuards[0].ObjectID); !errors.Is(err, ErrPlayerNotFound) {
+		t.Fatalf("out-of-range guard query: %v", err)
+	}
+}
+
 func TestWorldTeleportAcrossMaps(t *testing.T) {
 	world, cancel := startTestWorld(t, 3)
 	defer cancel()

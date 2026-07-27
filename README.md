@@ -29,7 +29,7 @@ go run ./cmd/gameserver -config configs/gameserver.json
 go run ./cmd/accountserver -config configs/accountserver.json
 ```
 
-The AccountServer, login-ticket flow, complete packet framing catalog, character-selection stage, legacy terrain loading, AOI, and authoritative player movement are implemented. Combat and the remaining world systems are being migrated incrementally; see [Go architecture and migration status](docs/go-architecture.md) and the [operations runbook](docs/go-runbook.md) for the exact compatibility boundary.
+The AccountServer, login-ticket flow, complete packet framing catalog, character-selection stage, legacy terrain loading, AOI, authoritative movement, teleport gates, and static guard/NPC visibility are implemented. Combat and the remaining world systems are being migrated incrementally; see [Go architecture and migration status](docs/go-architecture.md) and the [operations runbook](docs/go-runbook.md) for the exact compatibility boundary.
 
 ## 🚀 Getting Started
 

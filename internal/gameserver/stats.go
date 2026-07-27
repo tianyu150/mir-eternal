@@ -29,4 +29,5 @@ type StatsSnapshot struct {
 	LoadedMaps       int   `json:"loaded_maps"`
 	WorldPlayers     int   `json:"world_players"`
 	ActivePlayers    int   `json:"active_players"`
+	StaticGuards     int   `json:"static_guards"`
 }

@@ -238,9 +238,9 @@ func (s *Server) closeSessions() {
 }
 func (s *Server) Snapshot() StatsSnapshot {
 	accounts, characters := s.store.Counts()
-	loadedMaps, worldPlayers, activePlayers := 0, 0, 0
+	loadedMaps, worldPlayers, activePlayers, staticGuards := 0, 0, 0, 0
 	if s.world != nil {
-		loadedMaps, worldPlayers, activePlayers = s.world.Stats(context.Background())
+		loadedMaps, worldPlayers, activePlayers, staticGuards = s.world.Stats(context.Background())
 	}
-	return StatsSnapshot{Connections: s.stats.connections.Load(), Authenticated: s.stats.authenticated.Load(), Tickets: s.stats.tickets.Load(), BytesReceived: s.stats.bytesReceived.Load(), BytesSent: s.stats.bytesSent.Load(), PacketsReceived: s.stats.packetsReceived.Load(), PacketsSent: s.stats.packetsSent.Load(), UnhandledPackets: s.stats.unhandledPackets.Load(), Rejected: s.stats.rejected.Load(), PendingTickets: s.tickets.Len(), Accounts: accounts, Characters: characters, LoadedMaps: loadedMaps, WorldPlayers: worldPlayers, ActivePlayers: activePlayers}
+	return StatsSnapshot{Connections: s.stats.connections.Load(), Authenticated: s.stats.authenticated.Load(), Tickets: s.stats.tickets.Load(), BytesReceived: s.stats.bytesReceived.Load(), BytesSent: s.stats.bytesSent.Load(), PacketsReceived: s.stats.packetsReceived.Load(), PacketsSent: s.stats.packetsSent.Load(), UnhandledPackets: s.stats.unhandledPackets.Load(), Rejected: s.stats.rejected.Load(), PendingTickets: s.tickets.Len(), Accounts: accounts, Characters: characters, LoadedMaps: loadedMaps, WorldPlayers: worldPlayers, ActivePlayers: activePlayers, StaticGuards: staticGuards}
 }

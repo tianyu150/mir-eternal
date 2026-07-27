@@ -48,6 +48,37 @@ func decryptPacket(packet []byte) []byte {
 	return decoded
 }
 
+func TestGuardPacketsPreserveLegacyLayout(t *testing.T) {
+	guard := gameworld.Guard{ObjectID: 1_500_000_001, Template: 6734, Level: 99, Position: gameworld.Point{X: 935, Y: 375}, Altitude: 10, Direction: 7168, MaxHP: 9999}
+	packets, err := guardVisiblePackets(guard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(packets) != 3 {
+		t.Fatalf("guard visibility packet count=%d", len(packets))
+	}
+	stop := decryptPacket(packets[0])
+	visible := decryptPacket(packets[1])
+	hp := decryptPacket(packets[2])
+	if binary.LittleEndian.Uint16(stop) != 48 || int32(binary.LittleEndian.Uint32(stop[2:6])) != guard.ObjectID || readPoint(stop, 7, false) != guard.Position {
+		t.Fatalf("bad guard stop packet: %x", stop)
+	}
+	if binary.LittleEndian.Uint16(visible) != 60 || int32(binary.LittleEndian.Uint32(visible[3:7])) != guard.ObjectID || binary.LittleEndian.Uint16(visible[14:16]) != guard.Direction {
+		t.Fatalf("bad guard visible packet: %x", visible)
+	}
+	if binary.LittleEndian.Uint16(hp) != 78 || binary.LittleEndian.Uint32(hp[6:10]) != 9999 {
+		t.Fatalf("bad guard HP packet: %x", hp)
+	}
+	syncPacket, err := syncGuardPacket(guard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	syncPacket = decryptPacket(syncPacket)
+	if binary.LittleEndian.Uint16(syncPacket) != 65 || binary.LittleEndian.Uint16(syncPacket[6:8]) != guard.Template || syncPacket[10] != 3 || syncPacket[11] != guard.Level || binary.LittleEndian.Uint32(syncPacket[12:16]) != 9999 {
+		t.Fatalf("bad guard data packet: %x", syncPacket)
+	}
+}
+
 func TestTeleportPacketsPreserveLegacyLayout(t *testing.T) {
 	player := gameworld.Player{MapID: 143, RouteID: 1, Position: gameworld.Point{X: 100, Y: 200}, Altitude: 12}
 	changed, err := changeMapPacket(player)
